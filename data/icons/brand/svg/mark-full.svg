@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 124 140" fill="none" role="img" aria-label="Hermesnote 完整版">
+  <rect x="0" y="14" width="24" height="126" rx="5" fill="#17161A"></rect>
+  <line x1="38" y1="72" x2="38" y2="78" stroke="#17161A" stroke-width="2.2"></line>
+  <line x1="38" y1="106" x2="38" y2="120" stroke="#17161A" stroke-width="2.2"></line>
+  <rect x="30" y="78" width="16" height="28" fill="#17161A"></rect>
+  <line x1="62" y1="50" x2="62" y2="64" stroke="#17161A" stroke-width="2.2"></line>
+  <line x1="62" y1="72" x2="62" y2="92" stroke="#17161A" stroke-width="2.2"></line>
+  <rect x="54" y="64" width="16" height="8" fill="#17161A"></rect>
+  <rect x="78" y="48" width="16" height="7" fill="#BF3A2B"></rect>
+  <line x1="86" y1="55" x2="86" y2="100" stroke="#BF3A2B" stroke-width="2.2"></line>
+  <rect x="100" y="0" width="24" height="126" rx="5" fill="#BF3A2B"></rect>
+</svg>

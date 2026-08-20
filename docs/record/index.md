@@ -5,3 +5,4 @@
 | 日期 | 摘要 | 詳細 |
 |------|------|------|
 | 2026-08-17 | 專案啟動討論：確立重做目的（刻意練習優先於作品集）、保留範圍、目錄結構（docs/frontend/backend/data 同層，record 在 docs 底下）、建立 GitHub repo | [archive/2026-08-17.md](archive/2026-08-17.md) |
+| 2026-08-18 | 定位修正為研究敘事型網站；前端骨架建立，Hero 區塊（logo+三分頁即時渲染面板）定稿，RWD 用 clamp() 修正 | [archive/2026-08-18.md](archive/2026-08-18.md) |

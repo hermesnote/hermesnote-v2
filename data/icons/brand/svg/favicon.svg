@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" fill="none" role="img" aria-label="Hermesnote favicon">
+  <rect width="160" height="160" fill="#17161A"></rect>
+  <g transform="translate(23 15) scale(0.9)">
+  <rect x="0" y="14" width="30" height="126" fill="#F6F4F0"></rect>
+  <rect x="36" y="72" width="26" height="32" fill="#F6F4F0"></rect>
+  <rect x="66" y="44" width="26" height="28" fill="#E2624F"></rect>
+  <rect x="94" y="0" width="30" height="126" fill="#E2624F"></rect>
+  </g>
+</svg>

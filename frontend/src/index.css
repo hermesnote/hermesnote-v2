@@ -1,0 +1,47 @@
+:root {
+  --paper: #f6f5f1;
+  --paper-raised: #ffffff;
+  --ink: #16181d;
+  --ink-soft: #565b66;
+  --ink-faint: #8a8f99;
+  --line: #e4e1d9;
+  --accent: #2f4b8f;
+  --accent-soft: #eaeef7;
+  --accent-ink: #1c2f5c;
+
+  --panel-bg: #ffffff;
+  --panel-grid: #ece8e0;
+  --panel-text: #16181d;
+  --panel-text-dim: #8a8f99;
+  --candle-up: #1f9d67;
+  --candle-down: #c94040;
+  --status-amber: #b8781f;
+  --brand-red: #bf3a2b;
+
+  --radius-s: 3px;
+  --radius-m: 6px;
+
+  --font-display: "Fraunces", ui-serif, Georgia, "Noto Serif TC", serif;
+  --font-body: "IBM Plex Sans", "PingFang TC", "Noto Sans TC", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: inherit;
+}
