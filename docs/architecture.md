@@ -76,6 +76,30 @@ frontend/
 - 前端圖表函式庫：`lightweight-charts`（TradingView 出的開源輕量圖表庫），回測重播跟未來的即時報價共用同一套元件，差別只在資料怎麼餵進去（一個是重播批次算好的資料，一個是接即時串流）
 - 資料流向：後端（TA-Lib + vectorbt 算數據）→ API / websocket → 前端 `lightweight-charts` 渲染
 
+## 前端路由與版面（2026-09-02 改版）
+
+- 改用 **React Router**（`react-router-dom` v7）做真的頁面路由，不再是單頁滾動敘事
+- `Layout.tsx`：固定外層（logo lockup 靠左縮小、深色版 + 導覽列「模型訓練」「量化回測」），`<Outlet/>` 渲染下方頁面內容
+- 整站改深色主題（`index.css` 的 `:root` token 全部換成深色版），logo 用品牌系統內建的 reverse 變體（`#F6F4F0` 米白 + `#E2624F` 深底紅），不是自己發明的顏色
+- 舊的 Hero 三分頁面板、過去專案輪播已從頁面上移除（程式碼保留在 `components/`，未刪除，之後可能重用）
+- 公開頁面（`/quant`、`/model`）**只呈現，不提供操作**——送實驗的設定區（選特徵/參數/送出按鈕）規劃放在需要登入的後台，尚未實作，登入機制討論延後
+
+## 量化回測 Demo（第一個打通的垂直切片，2026-09-02）
+
+**驗證完成：資料庫 → TA-Lib → 策略層 → vectorbt → FastAPI → 前端圖表，整條路真的通了。**
+
+- 資料來源：`quotes` DB（唯讀）`market.future_taifex_tx_15m`，2011 年至今，197,274 筆
+- **重要資料品質問題（已修正，未來要記得）**：這張表(以及推測其他 `future_taifex_*` 表)偶爾同一根 K 棒因為資料管線重跑被寫入兩筆，`rule_version` 相同但 `built_at` 不同（差幾秒，像是同一批次跑了兩次沒做 upsert）。查詢時要 `ORDER BY datetime ASC, built_at ASC`，再依 datetime 去重保留最後一筆（= 最新 `built_at`），否則會有重複時間戳記，前端圖表庫會直接報錯拒畫
+- 三段式管線（誰負責什麼，之前釐清過的分工）：
+  1. **TA-Lib 算指標數值**（demo 用 RSI，`timeperiod=14`）——只是數字，沒有「該不該進場」的意思
+  2. **策略/規則層（我們自己寫的程式碼，TA-Lib 和 vectorbt 都不提供）**——把指標數值轉成進出場布林訊號（demo 規則：RSI 由上往下跌破 30 進場、由下往上突破 70 出場）。這層對應 `library.md` 分類裡 `Custom → Structure → Events`
+  3. **vectorbt 模擬**——`Portfolio.from_signals(close, entries, exits, ...)`，吐出完整 Portfolio 物件（逐筆交易、權益曲線、統計數字）
+- 後端：`backend/services/backtest_demo.py`（管線邏輯）+ `backend/main.py`（`GET /api/backtest/demo`，asyncpg 查資料庫，TA-Lib/vectorbt 是同步運算丟到 `asyncio.to_thread` 避免卡住 event loop）
+- 前端：`frontend/src/pages/QuantBacktestPage.tsx`，`lightweight-charts` v5（`addSeries(CandlestickSeries, ...)` + `createSeriesMarkers()` 標進出場箭頭），下方交易明細表 + 統計數字列
+- **套件版本注意**：`plotly` 要鎖 `5.24.1`——開源版 `vectorbt`（1.1.0）跟 pip 預設裝的最新版 plotly（改了屬性名稱）不相容，import 就直接掛掉，這個要記進 `requirements.txt`（已凍結在 `backend/requirements.txt`）
+- **這只是 demo 管線，不是最終策略**：RSI 門檻策略本身是賠錢的（示範用），重點是驗證整條技術路徑通不通，不是策略好壞
+
 ## 已完成
 
-- Hero 區塊（`src/components/Hero.tsx` / `Hero.css`）：品牌識別、三分頁即時渲染面板（交易系統／模型訓練／量化回測）、standby 誠實狀態、RWD 用 `clamp()` 讓寬高同時隨視窗縮放
+- Hero 區塊（`src/components/Hero.tsx` / `Hero.css`，**目前未掛載在頁面上**）：品牌識別、三分頁即時渲染面板（交易系統／模型訓練／量化回測）、standby 誠實狀態、RWD 用 `clamp()` 讓寬高同時隨視窗縮放
+- `/quant` 頁面：真的資料、真的圖表、真的交易明細，第一個完整垂直切片

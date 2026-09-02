@@ -1,22 +1,22 @@
 :root {
-  --paper: #f6f5f1;
-  --paper-raised: #ffffff;
-  --ink: #16181d;
-  --ink-soft: #565b66;
-  --ink-faint: #8a8f99;
-  --line: #e4e1d9;
-  --accent: #2f4b8f;
-  --accent-soft: #eaeef7;
-  --accent-ink: #1c2f5c;
+  --paper: #0d0f12;
+  --paper-raised: #16191d;
+  --ink: #e9eaec;
+  --ink-soft: #a8adb8;
+  --ink-faint: #6b7280;
+  --line: #262a30;
+  --accent: #e2624f;
+  --accent-soft: #3a231f;
+  --accent-ink: #f3b7ac;
 
-  --panel-bg: #ffffff;
-  --panel-grid: #ece8e0;
-  --panel-text: #16181d;
-  --panel-text-dim: #8a8f99;
-  --candle-up: #1f9d67;
-  --candle-down: #c94040;
-  --status-amber: #b8781f;
-  --brand-red: #bf3a2b;
+  --panel-bg: #16191d;
+  --panel-grid: #23272d;
+  --panel-text: #e9eaec;
+  --panel-text-dim: #6b7280;
+  --candle-up: #3ecf8e;
+  --candle-down: #f0616b;
+  --status-amber: #e8b339;
+  --brand-red: #e2624f;
 
   --radius-s: 3px;
   --radius-m: 6px;
@@ -25,7 +25,7 @@
   --font-body: "IBM Plex Sans", "PingFang TC", "Noto Sans TC", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
 
-  color-scheme: light;
+  color-scheme: dark;
 }
 
 * {

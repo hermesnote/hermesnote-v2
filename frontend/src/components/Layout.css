@@ -1,0 +1,42 @@
+.shell-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px clamp(20px, 4vw, 48px);
+  border-bottom: 1px solid var(--line);
+}
+
+.shell-lockup {
+  height: 26px;
+  width: auto;
+  flex-shrink: 0;
+  overflow: visible;
+}
+
+.shell-nav {
+  display: flex;
+  gap: 4px;
+}
+.shell-nav-link {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  letter-spacing: 0.03em;
+  color: var(--ink-faint);
+  text-decoration: none;
+  padding: 8px 14px;
+  border-radius: var(--radius-s);
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.shell-nav-link:hover {
+  color: var(--ink);
+  background: var(--paper-raised);
+}
+.shell-nav-link.is-active {
+  color: var(--ink);
+  background: var(--accent-soft);
+}
+
+.shell-main {
+  min-height: calc(100vh - 55px);
+  min-height: calc(100svh - 55px);
+}
