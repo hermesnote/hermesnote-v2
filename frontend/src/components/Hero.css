@@ -1,9 +1,17 @@
+.hero-viewport {
+  min-height: 100vh;
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+}
+
 .identity {
   padding: 46px clamp(20px, 4vw, 48px) 44px;
   display: flex;
   justify-content: center;
   align-items: center;
   border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
 }
 .identity-lockup-wrap {
   display: flex;
@@ -17,9 +25,11 @@
 }
 
 .hero {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
   padding: clamp(28px, 5vw, 56px) 0 64px;
 }
-
 .hero-content {
   width: clamp(1400px, 74vw, 1900px);
   max-width: 96%;

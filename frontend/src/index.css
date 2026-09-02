@@ -32,8 +32,14 @@
   box-sizing: border-box;
 }
 
-body {
+html,
+body,
+#root {
+  height: 100%;
   margin: 0;
+}
+
+body {
   background: var(--paper);
   color: var(--ink);
   font-family: var(--font-body);
@@ -44,4 +50,13 @@ body {
 
 a {
   color: inherit;
+}
+
+.app-scroll {
+  scroll-behavior: smooth;
+}
+@media (prefers-reduced-motion: reduce) {
+  .app-scroll {
+    scroll-behavior: auto;
+  }
 }

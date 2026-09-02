@@ -113,7 +113,7 @@ export default function Hero() {
   const ActiveChart = CHARTS[active];
 
   return (
-    <>
+    <section className="hero-viewport">
       <header className="identity">
         <div className="identity-lockup-wrap">
           <svg
@@ -153,7 +153,7 @@ export default function Hero() {
         </div>
       </header>
 
-      <section className="hero">
+      <div className="hero">
         <div className="hero-content">
         <div className="view-tabs-wrap">
           <div className="view-tabs" role="tablist">
@@ -191,7 +191,7 @@ export default function Hero() {
           </div>
         </div>
         </div>
-      </section>
-    </>
+      </div>
+    </section>
   );
 }
