@@ -1,0 +1,576 @@
+.model-page {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px clamp(16px, 3vw, 32px) 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.model-topbar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.model-mode-switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.model-mode-select {
+  background: var(--panel-bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  padding: 5px 8px;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  max-width: 360px;
+}
+.model-switch-hint {
+  background: var(--accent-soft);
+  border: 1px solid var(--brand-red);
+  border-radius: var(--radius-s);
+  color: var(--accent-ink);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.model-empty {
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  padding: 40px 0;
+  text-align: center;
+}
+
+.model-status {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--ink-faint);
+  position: relative;
+}
+.model-status.is-error {
+  color: var(--candle-down);
+}
+.model-status-warn {
+  color: var(--status-amber, #d9a441);
+}
+.model-status-error {
+  margin-top: 4px;
+  font-size: 0.72rem;
+  color: var(--candle-down);
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.model-jobid-toggle {
+  margin-left: 10px;
+  background: none;
+  border: none;
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.model-jobid-detail {
+  margin-top: 4px;
+  font-size: 0.7rem;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.model-jobid-detail code {
+  color: var(--ink-soft);
+}
+.model-jobid-detail button {
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  color: var(--ink-faint);
+  font-size: 0.66rem;
+  padding: 1px 6px;
+  cursor: pointer;
+}
+
+/* 左側設定欄跟右側圖表改用 flex 兩個獨立欄位，不是 CSS Grid 的共用列高——
+   Grid 底下如果讓 .model-left 橫跨多個 row，左側「其他參數」/特徵展開撐高內容時，
+   會逼著那幾個 row 一起變高，右側圖表之間就會被拉出一大段空白（這是原本的呈現問題）。
+   Flex 兩個 item 各自依自己內容決定高度，互不影響，天生就不會有這個耦合。 */
+.model-body {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+@media (max-width: 900px) {
+  .model-body {
+    /* flex-direction 從 row 換成 column 之後，flex-basis 控制的是「高度」不是「寬度」了——
+       align-items:flex-start 這時候變成沿著（現在的）水平交錯軸做 shrink-to-fit，兩欄都會
+       縮成內容本身的寬度，不會撐滿版面，圖表容器（含裡面的 lightweight-charts canvas）就會
+       卡在一個奇怪的窄寬度，不是真的「裁切」但看起來會很怪。改成 stretch 讓兩欄都撐滿寬度。 */
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+.model-right {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+/* 沒有 job 時蓋在整個區塊上面的提示——圖表容器本身還是照常掛載在底下，
+   只是疊層蓋住看不到，這樣圖表 instance 才能在第一次掛載時就建立好。 */
+.model-empty-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--paper, #0f1115);
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  border-radius: var(--radius-m);
+}
+
+/* A：左側設定欄，固定寬度、自己內部捲動——高度不跟右側圖表共用，展開再多內容
+   都只在自己這欄內滾動，不會撐開右側的間距。 */
+.model-left {
+  flex: 0 0 clamp(220px, 22vw, 300px);
+  max-height: calc(100vh - 220px);
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m);
+  background: var(--paper-raised);
+}
+@media (max-width: 900px) {
+  .model-left {
+    /* 疊起來之後 flex-basis 控制的是高度，不是寬度——固定 clamp(220px,22vw,300px) 當高度
+       會變成一個奇怪的矮盒子；改回 auto 讓高度回到「內容需要多高就多高」，寬度已經靠上面
+       .model-body 的 align-items:stretch 撐滿了。 */
+    flex-basis: auto;
+    max-width: none;
+    max-height: none;
+  }
+}
+.model-left-section {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.model-left-section:last-child {
+  border-bottom: none;
+}
+.model-left-title {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--ink-faint);
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.model-info-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.78rem;
+  padding: 3px 0;
+}
+.model-info-row span {
+  color: var(--ink-faint);
+}
+.model-info-row strong {
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-weight: 500;
+  text-align: right;
+}
+.model-node-select {
+  margin-left: 8px;
+  background: var(--panel-bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  padding: 1px 4px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.model-params-detail {
+  margin-top: 6px;
+  font-size: 0.72rem;
+}
+.model-params-detail summary {
+  cursor: pointer;
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+}
+.model-feature-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.model-feature-tag {
+  background: var(--panel-bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.model-feature-tag:hover {
+  border-color: var(--ink-soft);
+  color: var(--ink);
+}
+.model-feature-params {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+
+/* C：下方 loss/accuracy 曲線 + 窗格清單 */
+.model-progress-wrap {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m);
+  background: var(--paper-raised);
+  padding: 10px;
+}
+.model-progress-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.model-compact-progress {
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  color: var(--ink-soft);
+}
+.model-progress-charts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 8px;
+}
+@media (max-width: 900px) {
+  .model-progress-charts {
+    grid-template-columns: 1fr;
+  }
+}
+.model-chart-label {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--ink-faint);
+  margin-bottom: 4px;
+}
+.model-progress-chart-inner {
+  position: relative;
+}
+.model-progress-chart {
+  height: 200px;
+}
+.model-progress-waiting {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--paper, #0f1115);
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+}
+/* 固定圖例：取代 lightweight-charts 預設的右側大標籤＋水平延伸線（那會遮擋曲線）——
+   預設顯示最新一輪，滑鼠移到圖上時改顯示 hover 的那一輪，train/val 用顏色＋實線/虛線
+   區分，不是只靠顏色。 */
+.model-chart-legend {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--ink-soft);
+  background: color-mix(in srgb, var(--paper, #0f1115) 78%, transparent);
+  padding: 3px 8px;
+  border-radius: var(--radius-s);
+  pointer-events: none;
+}
+.model-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.model-legend-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 0;
+  border-top: 2px solid;
+  border-color: inherit;
+}
+.model-legend-swatch.is-solid {
+  border-top-style: solid;
+  border-color: transparent; /* 用 background 畫實線色塊，border 只用在虛線 */
+  height: 2px;
+}
+.model-legend-swatch.is-dashed {
+  border-top-style: dashed;
+}
+.model-legend-epoch {
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+.model-epoch-toggle {
+  margin-top: 10px;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.model-epoch-toggle:hover {
+  color: var(--ink);
+  border-color: var(--ink-soft);
+}
+.model-epoch-list {
+  max-height: 260px;
+  overflow-y: auto;
+  margin-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.model-epoch-row {
+  display: grid;
+  grid-template-columns: 60px 1fr 1fr 1fr 1fr;
+  gap: 8px;
+  padding: 6px 8px;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  cursor: pointer;
+  border-bottom: 1px solid var(--line);
+}
+.model-epoch-row:hover {
+  background: var(--paper);
+}
+.model-epoch-row.is-selected {
+  background: var(--accent-soft);
+}
+.model-epoch-header {
+  font-weight: 600;
+  color: var(--ink-faint);
+  cursor: default;
+}
+.model-epoch-header:hover {
+  background: transparent;
+}
+
+/* B：主要區域——訓練即時預覽（抽樣窗格，持續更換）／完成後歷史瀏覽，共用同一個
+   K 線圖表，不是留一張跟核心功能無關的大歷史圖再把功能塞進小圖。 */
+.model-primary-wrap {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m);
+  background: var(--paper-raised);
+  padding: 10px;
+}
+.model-primary-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.model-mode-tabs {
+  display: flex;
+  gap: 4px;
+}
+.model-mode-tabs button {
+  background: var(--panel-bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+.model-mode-tabs button.is-active {
+  color: var(--ink);
+  border-color: var(--brand-red);
+  background: var(--accent-soft);
+}
+.model-preview-badge {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border: 1px solid var(--brand-red);
+  border-radius: var(--radius-s);
+  padding: 2px 7px;
+}
+.model-preview-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: 12px;
+  margin-top: 8px;
+}
+@media (max-width: 900px) {
+  .model-preview-body {
+    grid-template-columns: 1fr;
+  }
+}
+.model-preview-chart-wrap {
+  position: relative;
+}
+.model-preview-chart {
+  height: 220px;
+}
+.model-preview-chart-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--paper, #0f1115);
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+.model-preview-info {
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.model-preview-info-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.model-preview-info-row span:first-child {
+  color: var(--ink-faint);
+}
+.model-preview-verdict {
+  margin-top: 4px;
+  padding: 4px 8px;
+  border-radius: var(--radius-s);
+  text-align: center;
+  font-weight: 600;
+}
+.model-preview-verdict.is-correct {
+  background: color-mix(in srgb, var(--candle-down) 18%, transparent);
+  color: var(--candle-down);
+}
+.model-preview-verdict.is-wrong {
+  background: color-mix(in srgb, var(--candle-up) 18%, transparent);
+  color: var(--candle-up);
+}
+/* 完成後歷史瀏覽：依 id 游標分頁的抽樣紀錄清單，點一筆就載入主圖表 */
+.model-history-list {
+  max-height: 220px;
+  overflow-y: auto;
+  margin-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.model-history-row {
+  display: grid;
+  grid-template-columns: 1.3fr 0.6fr 1fr 1fr;
+  gap: 8px;
+  padding: 6px 8px;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  cursor: pointer;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-soft);
+}
+.model-history-row:hover {
+  background: var(--paper);
+}
+.model-history-row.is-selected {
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+.model-history-empty {
+  padding: 16px 0;
+  text-align: center;
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+}
+.model-history-retry {
+  margin-left: 8px;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.model-history-more {
+  width: 100%;
+  margin-top: 6px;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  padding: 6px;
+  cursor: pointer;
+}
+.model-history-more:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 左側特徵區塊的「全部展開／全部收合」，跟標題同一行右對齊 */
+.model-left-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.model-left-title-row .model-left-title {
+  margin-bottom: 0;
+}
+.model-feature-bulk {
+  display: flex;
+  gap: 4px;
+}
+.model-feature-bulk button {
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  padding: 2px 6px;
+  cursor: pointer;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.model-feature-bulk button:hover {
+  color: var(--ink);
+  border-color: var(--ink-soft);
+}

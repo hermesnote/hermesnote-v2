@@ -13,8 +13,9 @@
   --panel-grid: #23272d;
   --panel-text: #e9eaec;
   --panel-text-dim: #6b7280;
-  --candle-up: #3ecf8e;
-  --candle-down: #f0616b;
+  /* 台灣慣例：漲紅跌綠，跟西方相反，這兩個變數名稱不動、顏色值對調 */
+  --candle-up: #f0616b;
+  --candle-down: #3ecf8e;
   --status-amber: #e8b339;
   --brand-red: #e2624f;
 
@@ -53,6 +54,10 @@ a {
 }
 
 .app-scroll {
+  height: 100vh;
+  height: 100svh;
+  display: flex;
+  flex-direction: column;
   scroll-behavior: smooth;
 }
 @media (prefers-reduced-motion: reduce) {

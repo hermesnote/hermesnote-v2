@@ -11,9 +11,11 @@
 | 文件 | 內容 | 狀態 |
 |------|------|------|
 | （待建）spec.md | 主規格：範圍、目的、非目標 | 討論中 |
-| [architecture.md](architecture.md) | 技術棧、前端結構、圖表/即時渲染技術路徑 | 使用中 |
+| [architecture.md](architecture.md) | 技術棧、前端結構、後台/量化回測策略引擎架構 | 使用中 |
+| [library.md](library.md) | 特徵庫分類樹（TA-Lib 161 個 + Custom），含一句話中文說明 | 使用中 |
 | （待建）decisions.md | 決策紀錄（決定＋理由＋替代方案） | 未開始 |
 | [record/index.md](record/index.md) | 開發記錄摘要索引 | 使用中 |
+| [agent-api/index.md](agent-api/index.md) | 給 Agent 呼叫 API 用的操作手冊（回測已可用，訓練/實驗重現待建） | 使用中 |
 
 ## 專案根目錄結構
 

@@ -1,0 +1,22 @@
+.section-placeholder {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--ink-faint);
+  text-align: center;
+  padding: 24px;
+}
+
+.section-placeholder-title {
+  font-family: var(--font-mono);
+  font-size: 1.1rem;
+  color: var(--ink-soft);
+}
+
+.section-placeholder-note {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactElement } from "react";
 import "./Hero.css";
 
 type ViewKey = "trade" | "train" | "backtest";
@@ -102,7 +102,7 @@ function BacktestChart() {
   );
 }
 
-const CHARTS: Record<ViewKey, () => JSX.Element> = {
+const CHARTS: Record<ViewKey, () => ReactElement> = {
   trade: TradeChart,
   train: TrainChart,
   backtest: BacktestChart,

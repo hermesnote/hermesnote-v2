@@ -1,0 +1,230 @@
+.tree-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  background: var(--panel-bg);
+}
+
+.tree-group-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.tree-group-head select {
+  background: var(--paper-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  padding: 5px 8px;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+
+.tree-threshold,
+.tree-weight {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--ink-faint);
+}
+.tree-threshold input,
+.tree-weight input {
+  width: 60px;
+  background: var(--paper-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  padding: 4px 6px;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+}
+
+.tree-empty {
+  color: var(--ink-faint);
+  font-size: 0.78rem;
+  padding: 4px 0;
+}
+
+.tree-child-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-left: 2px solid var(--brand-red);
+  padding-left: 6px;
+}
+
+.tree-condition {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  background: var(--paper-raised);
+}
+.tree-condition-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.tree-condition-key {
+  font-size: 0.84rem;
+  color: var(--ink);
+}
+.tree-condition-desc {
+  flex-basis: 100%;
+  font-size: 0.72rem;
+  color: var(--ink-faint);
+  order: 1;
+}
+
+.tree-condition-kind {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--ink-faint);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  padding: 1px 6px;
+}
+.tree-condition-main label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--ink-faint);
+}
+.tree-condition-main input,
+.tree-condition-main select {
+  width: 70px;
+  background: var(--panel-bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  padding: 4px 6px;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+}
+
+.tree-remove-btn {
+  background: none;
+  border: none;
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  cursor: pointer;
+  padding: 2px 6px;
+  flex-shrink: 0;
+}
+.tree-remove-btn:hover {
+  color: var(--candle-down);
+}
+
+.tree-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.tree-adder {
+  position: relative;
+}
+.tree-adder-input {
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  padding: 5px 8px;
+  width: 200px;
+}
+.tree-adder-input:focus {
+  outline: none;
+  border-color: var(--ink-soft);
+  color: var(--ink);
+}
+.tree-adder-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 20;
+  width: 340px;
+  max-height: 280px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  background: var(--paper-raised);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.tree-adder-empty {
+  padding: 10px 12px;
+  font-size: 0.76rem;
+  color: var(--ink-faint);
+}
+.tree-adder-option {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  padding: 7px 10px;
+  cursor: pointer;
+}
+.tree-adder-option:last-child {
+  border-bottom: none;
+}
+.tree-adder-option:hover:not(:disabled) {
+  background: var(--panel-bg);
+}
+.tree-adder-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+.tree-adder-option-key {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--ink);
+  font-weight: 700;
+}
+.tree-adder-option-group {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  color: var(--ink-faint);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  padding: 0 4px;
+}
+.tree-adder-option-desc {
+  flex-basis: 100%;
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+}
+
+.tree-add-btn {
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.tree-add-btn:hover {
+  color: var(--ink);
+  border-color: var(--ink-soft);
+}

@@ -1,4 +1,5 @@
 .shell-header {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -37,6 +38,8 @@
 }
 
 .shell-main {
-  min-height: calc(100vh - 55px);
-  min-height: calc(100svh - 55px);
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
