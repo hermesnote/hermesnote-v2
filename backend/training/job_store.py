@@ -4,6 +4,32 @@ import json
 import uuid
 
 from services.hermesnote_db import get_conn
+from training import json_safe
+
+# 2026-09-18 修正：`result` 這個 JSONB 欄位本來應該只放摘要（final_metrics/device/
+# training_meta 這類），但 graph.py 曾經把逐樣本長度的 prediction_source 陣列也塞進去
+# （5 筆真實規模的 LSTM 任務因此每筆 result 壓縮後就有 2.3~2.4MB，展開成 HTTP 回應
+# 高達 22MB）——這裡在 SQL 查詢端直接把每個節點物件底下的 prediction_source 這個 key
+# 剔除掉，不管是新寫入的任務（worker.py 那邊已經不會再寫這個 key，見下方 worker.py 的
+# 修正）還是資料庫裡本來就已經肥大的舊任務，查詢當下就會拿到剔除後的小物件，不需要
+# 對舊資料做任何遷移/清洗。real-world 驗證：3e4d15c1 那筆的 result 欄位，投影前
+# pg_column_size 是 2,440,674 bytes，投影後只剩 812 bytes。
+#
+# 用 jsonb_each 展開 result（頂層 key 是動態的 model node id，數量/名稱都不固定，
+# 不能寫死），對每個節點物件各自做 `value - 'prediction_source'`（jsonb 的「刪除
+# 指定 key」運算子，key 不存在時原樣不變，不會報錯），再用 jsonb_object_agg 組回同樣
+# 形狀的物件。result 本身可能是 NULL（job 還沒完成）或 '{}'（理論上不會發生，但
+# jsonb_each 對空物件會產生 0 列，object_agg 對 0 列的結果是 NULL，所以額外包一層
+# COALESCE 讓「原本是空物件」跟「原本是 NULL」不會被搞混）。
+_RESULT_PROJECTION = """
+    CASE
+        WHEN result IS NULL THEN NULL
+        ELSE COALESCE(
+            (SELECT jsonb_object_agg(key, value - 'prediction_source') FROM jsonb_each(result)),
+            '{}'::jsonb
+        )
+    END
+"""
 
 
 async def create_job(
@@ -67,7 +93,7 @@ async def mark_done(job_id: str, result: dict) -> None:
     try:
         await conn.execute(
             "UPDATE model_training_jobs SET status = 'done', result = $2, finished_at = now() WHERE id = $1",
-            uuid.UUID(job_id), json.dumps(result),
+            uuid.UUID(job_id), json_safe.dumps(result),
         )
     finally:
         await conn.close()
@@ -88,9 +114,9 @@ async def list_jobs(limit: int = 20) -> list[dict]:
     conn = await get_conn()
     try:
         rows = await conn.fetch(
-            """
-            SELECT id, graph_spec, status, error, result, device, job_type, phase, parent_job_id,
-                   created_at, started_at, finished_at
+            f"""
+            SELECT id, graph_spec, status, error, {_RESULT_PROJECTION} AS result, device, job_type,
+                   phase, parent_job_id, created_at, started_at, finished_at
             FROM model_training_jobs
             ORDER BY created_at DESC
             LIMIT $1
@@ -121,7 +147,14 @@ async def list_jobs(limit: int = 20) -> list[dict]:
 async def get_job(job_id: str) -> dict | None:
     conn = await get_conn()
     try:
-        row = await conn.fetchrow("SELECT * FROM model_training_jobs WHERE id = $1", uuid.UUID(job_id))
+        row = await conn.fetchrow(
+            f"""
+            SELECT id, graph_spec, status, error, {_RESULT_PROJECTION} AS result, device, job_type,
+                   phase, parent_job_id, created_at, started_at, finished_at
+            FROM model_training_jobs WHERE id = $1
+            """,
+            uuid.UUID(job_id),
+        )
     finally:
         await conn.close()
     if row is None:
@@ -177,7 +210,9 @@ async def get_progress(job_id: str) -> list[dict]:
     try:
         rows = await conn.fetch(
             """
-            SELECT epoch, loss, accuracy, val_loss, val_accuracy, window_meta, created_at
+            -- SELECT * 而不是列出 metrics 欄：遷移（新增 metrics 欄）還沒套用之前，讀取歷史進度
+            -- 仍然能運作（舊列本來就沒有擴充指標），不會因為欄位還不存在就整支 500
+            SELECT *
             FROM model_training_progress
             WHERE job_id = $1
             ORDER BY id ASC
@@ -194,6 +229,8 @@ async def get_progress(job_id: str) -> list[dict]:
             "val_loss": r["val_loss"],
             "val_accuracy": r["val_accuracy"],
             "window_meta": json.loads(r["window_meta"]) if r["window_meta"] else None,
+            # 擴充指標（各自有明確名稱，如 rmse／dir_acc／joint_loss），舊 architecture 的列是 None
+            "metrics": json.loads(r["metrics"]) if r.get("metrics") else None,
             "created_at": r["created_at"].isoformat(),
         }
         for r in rows

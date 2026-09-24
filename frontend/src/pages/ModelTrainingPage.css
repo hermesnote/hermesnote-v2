@@ -574,3 +574,25 @@
   color: var(--ink);
   border-color: var(--ink-soft);
 }
+
+/* 雙頭 LSTM 每輪擴充指標欄位較多；以及最新一輪／最終模型（best／last）／評估報告的指標摘要（所有架構共用） */
+.model-epoch-row-dual {
+  grid-template-columns: 44px repeat(10, minmax(72px, 1fr));
+  min-width: 860px;
+}
+.model-epoch-list { overflow-x: auto; }
+.model-dual-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+  margin-top: 12px;
+}
+.model-dual-metrics-block {
+  flex: 1 1 260px;
+  min-width: 240px;
+}
+.model-dual-metrics-title {
+  font-size: 0.78rem;
+  color: var(--ink-faint);
+  margin-bottom: 6px;
+}

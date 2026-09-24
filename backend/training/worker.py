@@ -25,6 +25,7 @@ from datetime import date
 from training import job_store
 from training.artifacts import save_artifacts_for_job
 from training.graph import run_graph
+from training.graph_refs import validate_graph_spec
 from training.inference import run_inference_chunked
 from training.inference_store import open_prediction_writer
 from training.preview_store import save_preview_sample
@@ -72,6 +73,43 @@ async def _load_dataframes(graph_spec: dict) -> dict:
     return dfs
 
 
+# model_training_jobs.result 只給前台顯示「這個節點的訓練摘要」用（GET /jobs/{id}／
+# GET /jobs 都會把整個 result 欄位讀出來、序列化成 HTTP 回應），不是完整訓練產物的
+# 存放處——完整產物（權重、逐節點的 preprocessing_state/model_config，供之後推論用）
+# 已經存進 model_artifacts 這張表，`services/model_artifacts.py`／`training/artifacts.py`
+# 才是那些欄位真正的讀取來源，這裡不需要也不應該重複保存一份。
+#
+# 2026-09-18 修正：這裡原本是「黑名單」（只濾掉 predict/predict_proba/weights 這三個
+# 不可序列化的欄位，其餘一律放行），graph.py 之後新增的 prediction_source（逐樣本
+# train/val/unused 標記陣列，長度等於整個訓練期間的樣本數）就這樣被放行、直接存進
+# 這個本來該是輕量摘要的欄位——5 筆真實規模的 LSTM 任務因此 result 壓縮後高達
+# 2.3~2.4MB，前台讀一次歷史紀錄的 GET /jobs/{id} 就要序列化/傳輸 22MB，正是這次
+# 效能問題的根因（另外在 job_store.py 的 SQL 查詢端也做了投影防禦，涵蓋這次修正
+# 之前就已經存進資料庫的舊任務，這裡的白名單只防未來新任務）。
+#
+# 改成白名單：只留前台/後台實際會讀的欄位（`ModelTrainingPage.tsx`／`ModelSettings.tsx`
+# 目前只用到 final_metrics／device／training_meta；output_specs 是具名輸出的 metadata，
+# 很小，讓前台與 Agent 能讀到這個節點各輸出的語意），日後
+# graph.py 或任一 architecture 的 train_*() 函式新增任何欄位（不管是不是像
+# prediction_source 這種跟樣本數等長的陣列），預設都不會被放進這個摘要欄位，
+# 除非明確把它加進這個清單——避免同一種「忘記排除大欄位」的錯誤重演。
+# prediction_source 目前的樣本來源逐列標記語意仍有價值（E 項多模型對齊設計的一部分，
+# 見 docs/temp/2026-09-10-three-party-design-alignment.md），只是不該用這種方式存；
+# 若之後真的需要逐列查詢，應該另外設計分批儲存/分頁查詢（比照 model_inference_predictions
+# 的做法），不是這輪要做的事。
+# evaluation：訓練後對整個驗證集算的完整分類／回歸評估報告（見 training/evaluation.py），
+# 大小是 O(類別數)，跟 prediction_source 那種 O(樣本數) 陣列不是同一個等級，可以放行。
+_SUMMARY_KEYS = {"final_metrics", "device", "training_meta", "output_specs", "evaluation"}
+
+
+def _summarize(results: dict) -> dict:
+    """results（run_graph 的完整回傳）→ 輕量摘要，給 job.result 用。"""
+    return {
+        node_id: {k: v for k, v in r.items() if k in _SUMMARY_KEYS}
+        for node_id, r in results.items()
+    }
+
+
 def run_one_sync(job_id: str, graph_spec: dict, dfs: dict) -> dict:
     def data_loader(timeframe: str):
         return dfs[timeframe]
@@ -98,21 +136,16 @@ def run_one_sync(job_id: str, graph_spec: dict, dfs: dict) -> dict:
 
     results = run_graph(graph_spec, data_loader, on_epoch, on_preview)
     # 訓練成功當下就落地保存模型產物（見 training/artifacts.py 的說明：不能等使用者
-    # 事後按「儲存」才存，那時候模型物件已經從記憶體消失了）。用還沒被下面濾過的 results
-    # （含 weights/model_config），存完才濾掉不可序列化的欄位存進 job 的 result 摘要。
+    # 事後按「儲存」才存，那時候模型物件已經從記憶體消失了）。
     save_artifacts_for_job(job_id, graph_spec, results)
-    # predict/predict_proba 是 closure（含模型本身）、weights 是原始 bytes——都不能序列化進
-    # model_training_jobs.result 這個 JSONB 欄位，只留 final_metrics/device/training_meta 這些
-    # 摘要；先前這裡漏了 predict_proba，任何跑到 output_mode="probability" 的分類任務存 DB
-    # 時會直接因為 json.dumps 序列化不了 function 而失敗，順手修掉。
-    _non_serializable = {"predict", "predict_proba", "weights"}
-    return {
-        node_id: {k: v for k, v in r.items() if k not in _non_serializable}
-        for node_id, r in results.items()
-    }
+    return _summarize(results)
 
 
 async def run_one(job_id: str, graph_spec: dict):
+    # 讀資料（會打 quotes DB、很貴）之前先驗證圖：API 已經驗過一次，這裡再驗是為了涵蓋繞過 API
+    # 直接寫進 model_training_jobs 的任務跟舊的 pending 列；失敗會由 main_loop 標記成 failed，
+    # 訊息就是驗證回報的全部問題。
+    validate_graph_spec(graph_spec)
     dfs = await _load_dataframes(graph_spec)
     result = await asyncio.to_thread(run_one_sync, job_id, graph_spec, dfs)
     await job_store.mark_done(job_id, result)
@@ -153,7 +186,7 @@ async def _load_dataframes_for_infer(target_job_id: str, target_node_id: str, st
     return dfs
 
 
-def run_infer_sync(job_id: str, target_job_id: str, target_node_id: str, dfs: dict) -> dict:
+def run_infer_sync(job_id: str, target_job_id: str, target_node_id: str, dfs: dict, use_weights: str = "best") -> dict:
     """真正的串流入口：每算完一批就馬上用同一條連線寫進 model_inference_predictions
     再丟掉，不會像舊版那樣先呼叫 run_inference() 拿到一個跟全期間筆數一樣長的
     predictions list，才回頭分批寫 DB——那樣「分批」只解決了寫入 DB 那一步，
@@ -162,17 +195,25 @@ def run_infer_sync(job_id: str, target_job_id: str, target_node_id: str, dfs: di
     def data_loader(timeframe: str):
         return dfs[timeframe]
 
-    summary = {"count": 0, "start_ts": None, "end_ts": None}
+    summary = {"count": 0, "start_ts": None, "end_ts": None, "use_weights": use_weights}
     with open_prediction_writer(job_id, target_node_id) as writer:
-        def on_chunk(ts_chunk, preds_chunk, task_type, is_probability):
-            writer.write_chunk(ts_chunk, preds_chunk, task_type, is_probability)
+        def on_chunk(ts_chunk, preds_chunk, task_type, is_probability, output_kind=None, available_chunk=None):
+            writer.write_chunk(ts_chunk, preds_chunk, task_type, is_probability, output_kind, available_chunk)
             summary["count"] += len(ts_chunk)
             if summary["start_ts"] is None:
                 summary["start_ts"] = ts_chunk[0]
             if ts_chunk:
                 summary["end_ts"] = ts_chunk[-1]
+            if output_kind == "dual":
+                summary["output_type"] = "dual"
 
-        run_inference_chunked(target_job_id, target_node_id, data_loader, on_chunk)
+        run_inference_chunked(target_job_id, target_node_id, data_loader, on_chunk, use_weights=use_weights)
+    if summary.get("output_type") == "dual":
+        # 雙頭結果的語意（回歸值單位、事件規則）不逐列重複存，放在 infer job 的摘要裡，讀回時對照使用
+        from training.artifacts import load_artifact
+
+        art = load_artifact(target_job_id, target_node_id)
+        summary["output_specs"] = ((art or {}).get("model_config") or {}).get("output_specs")
     return summary
 
 
@@ -190,8 +231,9 @@ async def run_one_infer(job_id: str, infer_spec: dict):
     target_node_id = infer_spec["target_node_id"]
     start = date.fromisoformat(infer_spec["start"])
     end = date.fromisoformat(infer_spec["end"])
+    use_weights = infer_spec["use_weights"]
     dfs = await _load_dataframes_for_infer(target_job_id, target_node_id, start, end)
-    summary = await asyncio.to_thread(run_infer_sync, job_id, target_job_id, target_node_id, dfs)
+    summary = await asyncio.to_thread(run_infer_sync, job_id, target_job_id, target_node_id, dfs, use_weights)
     await job_store.mark_done(job_id, {target_node_id: summary})
     print(f"[worker] infer job {job_id} done（{summary['count']} 筆預測已分批存入 model_inference_predictions）", flush=True)
 

@@ -18,6 +18,12 @@ import "@xyflow/react/dist/style.css";
 import "./ModelSettings.css";
 import "./TreeBuilder.css";
 import { IndicatorAdder, findIndicator, type RegistryGroup } from "./TreeBuilder";
+import SchemaForm from "./SchemaForm";
+import { evaluationRows, type EvaluationPair, type EvaluationReport } from "../../evaluationRows";
+import {
+  buildParams, reconcileEnums, withInitialValues, withRequiredComponents,
+  type Component, type FormContext, type FormValues,
+} from "./schemaFormLogic";
 
 const API_BASE = import.meta.env.VITE_API_BASE as string;
 const TIMEFRAMES = ["1m", "5m", "15m", "30m", "60m", "1d"];
@@ -30,7 +36,17 @@ const SYMBOLS = [
 // talib_indicator + name），選到這幾個要走不同的節點格式，兩個地方都要判斷，抽出來共用。
 const CUSTOM_FEATURE_KEYS = ["ohlcv", "raw_price", "raw_volume"];
 
-type RegistryEntry = { key: string; description: string };
+// RegistryEntry 是各 GET /api/model/registry/* 的共同形狀（欄位依 registry 而異，沒有的是 undefined）：
+// architectures 帶 family／label／capabilities／slots／params_schema；outcomes 帶 unit／signed；
+// labeling_rules 帶 task_type。元件（attention／optimizer…）另外由 GET /registry/components/{name} 取得。
+type RegistryEntry = Component & {
+  description: string; family?: string;
+  unit?: string; signed?: boolean;
+  task_type?: "classification" | "regression" | null;
+  capabilities?: Record<string, "fixed_on" | "fixed_off" | "configurable">;
+  slots?: { slot_name: string; component_registry: string; cardinality: string; accepts_output_kind?: string[] }[];
+};
+
 type SavedStrategy = { saved_id: string; job_id: string; name: string | null; symbol: string; timeframe: string; created_at: string };
 // group：整組加入時標記這個特徵屬於哪個 TA-Lib 分類（例如「動量指標」），純 UI 用途，
 // 讓畫面能把同一組加進來的特徵收在一起顯示、一鍵整組移除；不影響 buildGraphSpec() 送出的節點格式。
@@ -58,24 +74,10 @@ type TrainingModule = {
   window: number;
   valRatio: number;
   splitStrategy: "random" | "chronological";
-  epochs: number;
   outputMode: "class" | "probability";
-  // Architecture 超參數，依 architectureKey 決定哪些欄位有意義（見 ARCHITECTURE_PARAM_FIELDS）
-  units: number;
-  layers: number;
-  dropout: number;
-  dense: number;
-  headDropout: number;
-  l2Lambda: number;
-  patience: number;
-  bidirectional: boolean;
-  classWeight: "none" | "balanced";
-  batchSize: number;
-  learningRate: number;
-  nEstimators: number;
-  maxDepth: number;
-  subsample: number;
-  colsampleBytree: number;
+  // 模型參數表單（SchemaForm）的值，依 architecture key 各存一份：切換架構再切回來，已填的值還在。
+  // key 是 params_schema 的 FieldSpec.name（dot path），見 schemaFormLogic.ts。
+  archValues: Record<string, FormValues>;
 };
 
 // outcome key -> 不合法的 labeling_rule 集合（跟後端 training/registry/labeling_rules.py 的
@@ -84,39 +86,16 @@ const ILLEGAL_LABELING_RULES: Record<string, string[]> = {
   future_price: ["fixed_threshold"],
 };
 
-// 每個 architecture 對應要顯示哪些超參數欄位；純數字輸入框為主，不用花俏 UI，
-// 只有 bidirectional（開關）跟 class_weight（none/balanced 兩種選項）不是數字。
-type ArchParamField =
-  | { key: keyof TrainingModule; label: string; type: "number"; step?: number }
-  | { key: keyof TrainingModule; label: string; type: "checkbox" }
-  | { key: keyof TrainingModule; label: string; type: "select"; options: { value: string; label: string }[] };
-
-const ARCHITECTURE_PARAM_FIELDS: Record<string, ArchParamField[]> = {
-  lstm: [
-    { key: "units", label: "units", type: "number" },
-    { key: "layers", label: "layers", type: "number" },
-    { key: "dropout", label: "dropout（LSTM 層）", type: "number", step: 0.05 },
-    { key: "dense", label: "dense（隱藏層寬度）", type: "number" },
-    { key: "headDropout", label: "head_dropout（Dense 後）", type: "number", step: 0.05 },
-    // bidirectional 改放共用第一排（跟 architecture/window 同一行），這裡不重複渲染。
-    { key: "l2Lambda", label: "l2_lambda（L2 正則化）", type: "number", step: 0.001 },
-    { key: "batchSize", label: "batch_size", type: "number" },
-    { key: "learningRate", label: "learning_rate", type: "number", step: 0.0001 },
-    { key: "patience", label: "patience（0=不啟用）", type: "number" },
-    {
-      key: "classWeight", label: "class_weight", type: "select",
-      options: [{ value: "none", label: "none" }, { value: "balanced", label: "balanced" }],
-    },
-  ],
-  xgboost: [
-    { key: "nEstimators", label: "n_estimators", type: "number" },
-    { key: "maxDepth", label: "max_depth", type: "number" },
-    { key: "learningRate", label: "learning_rate", type: "number", step: 0.01 },
-    { key: "subsample", label: "subsample", type: "number", step: 0.05 },
-    { key: "colsampleBytree", label: "colsample_bytree", type: "number", step: 0.05 },
-    { key: "patience", label: "patience（0=不啟用）", type: "number" },
-  ],
-};
+// 依 registry 回傳的 family 分組；只列有 params_schema 的正式登記架構（表單由 schema 產生）。
+function groupArchitecturesByFamily(list: RegistryEntry[]): [string, RegistryEntry[]][] {
+  const groups = new Map<string, RegistryEntry[]>();
+  for (const a of list.filter((x) => x.params_schema)) {
+    const family = a.family ?? a.key;
+    if (!groups.has(family)) groups.set(family, []);
+    groups.get(family)!.push(a);
+  }
+  return [...groups.entries()];
+}
 
 type JobSummary = {
   job_id: string;
@@ -124,11 +103,11 @@ type JobSummary = {
   status: "pending" | "running" | "done" | "failed";
   error: string | null;
   result: Record<string, {
-    final_metrics?: Record<string, number>;
-    /** 舊格式（一次性回傳全部預測值）；新版 infer job 改用下面的 count 摘要，不再整包塞這裡 */
-    predictions?: number[];
-    timestamps?: number[];
-    /** 新版 infer job 的摘要：全期間逐列結果已分批存進 model_inference_predictions，這裡只留筆數與時間範圍 */
+    // 頂層是最佳（best）那一輪的指標與訓練控制資訊；`last` 是最後一輪的同一組指標（巢狀物件）。
+    final_metrics?: Record<string, number | string | boolean | Record<string, number>>;
+    /** 完整分類／回歸評估報告，best／last 各一份（所有架構都有）。 */
+    evaluation?: EvaluationPair | null;
+    /** infer job 的摘要：全期間逐列結果分批存進 model_inference_predictions，這裡只留筆數與時間範圍 */
     count?: number;
     start_ts?: number | null;
     end_ts?: number | null;
@@ -165,23 +144,8 @@ function newModule(displayNumber: number): TrainingModule {
     window: 60,
     valRatio: 0.2,
     splitStrategy: "random",
-    epochs: 10,
     outputMode: "class",
-    units: 64,
-    layers: 2,
-    dropout: 0.2,
-    dense: 32,
-    headDropout: 0.2,
-    l2Lambda: 0,
-    patience: 0,
-    bidirectional: false,
-    classWeight: "none",
-    batchSize: 64,
-    learningRate: 0.001,
-    nEstimators: 100,
-    maxDepth: 6,
-    subsample: 1,
-    colsampleBytree: 1,
+    archValues: {},
   };
 }
 
@@ -213,12 +177,57 @@ function ModuleCardNode({ data }: NodeProps) {
 
 const nodeTypes = { moduleCard: ModuleCardNode };
 
+// 完整評估報告的展開／收合摘要：預設收合，點開才畫；best／last 各一份（所有架構都有）。
+function EvaluationSummary({ evaluation }: { evaluation: EvaluationPair }) {
+  const [open, setOpen] = useState(false);
+  const Block = ({ label, ev }: { label: string; ev: EvaluationReport }) => (
+    <div className="model-settings-eval-block">
+      <div className="model-settings-hint">{label}</div>
+      {evaluationRows(ev).map(([k, v]) => <div className="model-settings-hint" key={k}>{k}：{v}</div>)}
+    </div>
+  );
+  return (
+    <div className="model-settings-history-stat">
+      <button type="button" className="model-settings-add-btn" onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}>
+        {open ? "收起" : "展開"}完整評估報告
+      </button>
+      {open && (
+        <div onClick={(e) => e.stopPropagation()}>
+          <Block label="最佳權重（best）" ev={evaluation.best} />
+          <Block label="最後一輪權重（last）" ev={evaluation.last} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 模型參數表單需要的情境：task_type 由 labeling rule 決定、outcome 單位／正負號由 outcome 決定
+// （對應後端 architectures.describe_outputs 傳給 validate 的 context）。
+function schemaContext(m: TrainingModule, outcomes: RegistryEntry[], labelingRules: RegistryEntry[]): FormContext {
+  const outcome = outcomes.find((o) => o.key === m.outcomeKey);
+  return {
+    task_type: labelingRules.find((r) => r.key === m.labelingRuleKey)?.task_type ?? undefined,
+    outcome_unit: outcome?.unit, signed: outcome?.signed,
+  };
+}
+
+// 可共用元件登記表：{登記表名稱（attention／optimizer…）: 元件清單}，來自 GET /registry/components/{name}
+type ComponentRegistries = Record<string, Component[]>;
+
+// 這個模組目前選定架構的表單值（補上初始值、必填元件預選第一個相容的、enum 依情境校正）
+function archFormValues(m: TrainingModule, arch: RegistryEntry | undefined, ctx: FormContext, registries: ComponentRegistries): FormValues {
+  const schema = arch?.params_schema ?? [];
+  const initial = withInitialValues(schema, m.archValues[m.architectureKey] ?? {});
+  return reconcileEnums(schema, withRequiredComponents(schema, initial, registries, arch?.family ?? m.architectureKey), ctx);
+}
+
 export default function ModelSettings() {
   const navigate = useNavigate();
 
   const [outcomes, setOutcomes] = useState<RegistryEntry[]>([]);
   const [labelingRules, setLabelingRules] = useState<RegistryEntry[]>([]);
   const [architectures, setArchitectures] = useState<RegistryEntry[]>([]);
+  const [componentRegistries, setComponentRegistries] = useState<ComponentRegistries>({});
   const [savedStrategies, setSavedStrategies] = useState<SavedStrategy[]>([]);
   const [indicatorRegistry, setIndicatorRegistry] = useState<RegistryGroup[]>([]);
 
@@ -235,12 +244,21 @@ export default function ModelSettings() {
   const [inferTarget, setInferTarget] = useState<{ jobId: string; nodeId?: string; isPhase3?: boolean } | null>(null);
   const [inferStart, setInferStart] = useState("2026-09-01");
   const [inferEnd, setInferEnd] = useState("2026-09-08");
+  const [inferUseWeights, setInferUseWeights] = useState<"best" | "last">("best");
   const [inferError, setInferError] = useState("");
 
   useEffect(() => {
     fetch(`${API_BASE}/api/model/registry/outcomes`).then((r) => r.json()).then(setOutcomes);
     fetch(`${API_BASE}/api/model/registry/labeling_rules`).then((r) => r.json()).then(setLabelingRules);
-    fetch(`${API_BASE}/api/model/registry/architectures`).then((r) => r.json()).then(setArchitectures);
+    // 架構清單回來後，依各架構 slots 宣告的元件登記表名稱（attention、optimizer…）逐一抓元件清單——
+    // 新增登記表只要架構宣告 slot，這裡不用改
+    fetch(`${API_BASE}/api/model/registry/architectures`).then((r) => r.json()).then((list: RegistryEntry[]) => {
+      setArchitectures(list);
+      const names = [...new Set(list.flatMap((a) => (a.slots ?? []).map((sl) => sl.component_registry)))];
+      Promise.all(names.map((name) =>
+        fetch(`${API_BASE}/api/model/registry/components/${name}`).then((r) => r.json()).then((c: Component[]) => [name, c] as const),
+      )).then((pairs) => setComponentRegistries(Object.fromEntries(pairs))).catch(() => {});
+    });
     fetch(`${API_BASE}/api/backtest/saved-strategies`).then((r) => r.json()).then(setSavedStrategies).catch(() => {});
     // 特徵庫是「以 TA-Lib 分類為主幹，再加一個 Custom 分類」，不是把 Custom 當成
     // 跟 talib_indicator 平行、另外獨立出來的一種 feature key——Custom 底下目前有三個
@@ -333,6 +351,7 @@ export default function ModelSettings() {
         ...(inferTarget.nodeId ? { target_node_id: inferTarget.nodeId } : {}),
         start: inferStart, end: inferEnd,
         ...(inferTarget.isPhase3 ? { phase: 3 } : {}),
+        use_weights: inferUseWeights,
       }),
     })
       .then(async (res) => {
@@ -443,18 +462,12 @@ export default function ModelSettings() {
       });
       // inputs = 自己的 feature nodes + 畫布上「別的模組 → 這個模組」的邊（上游模組的輸出當額外特徵）
       const upstreamModuleIds = edges.filter((e) => e.target === m.id).map((e) => e.source);
-      const archParams: Record<string, number | boolean | string> =
-        m.architectureKey === "xgboost"
-          ? {
-              n_estimators: m.nEstimators, max_depth: m.maxDepth, learning_rate: m.learningRate,
-              subsample: m.subsample, colsample_bytree: m.colsampleBytree, patience: m.patience,
-            }
-          : {
-              units: m.units, layers: m.layers, dropout: m.dropout, dense: m.dense,
-              head_dropout: m.headDropout, bidirectional: m.bidirectional, l2_lambda: m.l2Lambda,
-              batch_size: m.batchSize, learning_rate: m.learningRate, patience: m.patience,
-              class_weight: m.classWeight,
-            };
+      const arch = architectures.find((a) => a.key === m.architectureKey);
+      const ctx = schemaContext(m, outcomes, labelingRules);
+      const params = buildParams(arch?.params_schema ?? [], archFormValues(m, arch, ctx, componentRegistries), ctx, componentRegistries);
+      // output_mode 只作用在單頭分類的 default 輸出；雙頭（heads="dual"）的方向機率用具名輸出
+      // direction_probability 引用，送 output_mode 會被後端拒絕。
+      const usesOutputMode = ctx.task_type === "classification" && params.heads !== "dual";
       nodesOut.push({
         id: m.id, type: "model", key: m.architectureKey,
         inputs: [...featureIds, ...upstreamModuleIds],
@@ -462,8 +475,9 @@ export default function ModelSettings() {
         // 這個表單建立的一律是 Phase 1（random），chronological 只能透過歷史紀錄的
         // 「進到 Phase 2」自動帶入，不讓使用者在這裡自己選——上一輪抓到的設計矛盾修正。
         split_strategy: "random",
-        output_mode: m.outputMode,
-        params: { epochs: m.epochs, n_classes: m.nClasses, ...archParams },
+        ...(usesOutputMode ? { output_mode: m.outputMode } : {}),
+        // params 就是 schema 表單的輸出（類別數由 Label 的 n_classes 決定，不放進模型參數）
+        params,
       });
     }
     return { start, end, nodes: nodesOut };
@@ -481,8 +495,9 @@ export default function ModelSettings() {
       // 之後要進 Phase 2/3，從歷史紀錄的「進到下一階段」按鈕觸發，不是從這裡重新填表單。
       body: JSON.stringify({ ...graphSpec, phase: 1 }),
     })
-      .then((res) => {
-        if (!res.ok) throw new Error(`送出失敗（${res.status}）`);
+      .then(async (res) => {
+        // 提交驗證不合法時後端回 400，detail 會一次列出全部問題（欄位路徑＋原因），照實顯示
+        if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `送出失敗（${res.status}）`);
         return res.json();
       })
       .then((json: { job_id: string }) => {
@@ -504,6 +519,40 @@ export default function ModelSettings() {
         refreshHistory();
       })
       .catch((e) => setSubmitError(e.message || "建立 Phase 2 任務失敗"));
+  }
+
+  // 用「同一組設定」在「同一個 Phase」重跑一次，產生一筆新的紀錄（原紀錄不動）。
+  //   Phase 1／未標 Phase 的訓練：把這筆的 graph_spec（資料範圍＋全部節點）原樣重送。
+  //   Phase 2：沿用同一個 Phase 1 母任務重新建立（後端會完整繼承母任務的設定、覆寫成時間切分）。
+  //   Phase 3／推論：同一個模型（target_job_id／node）、同一段區間重新推論，Phase 3 仍帶 phase=3。
+  // 改時間框架或特徵就是另一個實驗，不在這裡處理——請走「建立訓練」。
+  function handleRerun(job: JobSummary) {
+    if (!window.confirm("用同樣的設定重跑一次？會新增一筆紀錄，原紀錄不會被改動。")) return;
+    setSubmitError("");
+    let url: string;
+    let body: Record<string, unknown>;
+    if (job.job_type === "infer") {
+      const spec = job.graph_spec as unknown as { target_job_id: string; target_node_id: string; start: string; end: string; use_weights: "best" | "last" };
+      url = `${API_BASE}/api/model/infer`;
+      body = {
+        target_job_id: spec.target_job_id, target_node_id: spec.target_node_id, start: spec.start, end: spec.end,
+        use_weights: spec.use_weights,
+        ...(job.phase === 3 ? { phase: 3 } : {}),
+      };
+    } else if (job.phase === 2) {
+      if (!job.parent_job_id) { setSubmitError("這筆 Phase 2 紀錄沒有母任務，無法重跑"); return; }
+      url = `${API_BASE}/api/model/train`;
+      body = { start: "", end: "", nodes: [], phase: 2, parent_job_id: job.parent_job_id };
+    } else {
+      url = `${API_BASE}/api/model/train`;
+      body = { start: job.graph_spec.start, end: job.graph_spec.end, nodes: job.graph_spec.nodes, phase: job.phase };
+    }
+    fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+      .then(async (res) => {
+        if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || "重跑失敗");
+        refreshHistory();
+      })
+      .catch((e) => setSubmitError(e.message || "重跑失敗"));
   }
 
   return (
@@ -546,6 +595,7 @@ export default function ModelSettings() {
               outcomes={outcomes}
               labelingRules={labelingRules}
               architectures={architectures}
+              componentRegistries={componentRegistries}
               savedStrategies={savedStrategies}
               indicatorRegistry={indicatorRegistry}
               onCancel={() => setEditingModule(null)}
@@ -591,7 +641,10 @@ export default function ModelSettings() {
                     {job.phase && <span className="model-settings-history-phase">Phase {job.phase}</span>}
                     {isInfer && "［推論］"}
                     {new Date(job.created_at).toLocaleString("zh-TW")}
-                    {job.status !== "done" && ` ・ ${job.status === "failed" ? "失敗" : job.status === "running" ? "執行中" : "等待中"}`}
+                    {job.status !== "done" && ` ・ ${
+                      job.status === "failed" ? "失敗" :
+                      job.status === "running" ? "執行中" : "等待中"
+                    }`}
                   </div>
                   <div className="model-settings-history-config">
                     {job.graph_spec.start} ~ {job.graph_spec.end}　device: {job.device ?? "—"}
@@ -608,6 +661,16 @@ export default function ModelSettings() {
                     停止
                   </button>
                 )}
+                {job.status !== "pending" && job.status !== "running" && (
+                  <button
+                    type="button"
+                    className="model-settings-history-delete model-settings-history-rerun"
+                    title="用同樣的設定、在同一個 Phase 重跑一次（新增一筆紀錄）"
+                    onClick={(e) => { e.stopPropagation(); handleRerun(job); }}
+                  >
+                    重跑
+                  </button>
+                )}
                 <button
                   type="button"
                   className="model-settings-history-delete"
@@ -618,7 +681,7 @@ export default function ModelSettings() {
 
                 {isInfer && job.status === "done" && Object.entries(job.result || {}).map(([nodeId, r]) => (
                   <div key={nodeId} className="model-settings-history-stats">
-                    <div className="model-settings-history-stat"><span>推論筆數</span><strong>{r.count ?? r.predictions?.length ?? 0}</strong></div>
+                    <div className="model-settings-history-stat"><span>推論筆數</span><strong>{r.count ?? 0}</strong></div>
                   </div>
                 ))}
 
@@ -626,9 +689,25 @@ export default function ModelSettings() {
                   const artifact = artifacts.find((a) => a.job_id === job.job_id && a.node_id === nodeId);
                   return (
                     <div key={nodeId} className="model-settings-history-stats">
-                      {r.final_metrics && Object.entries(r.final_metrics).map(([k, v]) => (
-                        <div key={k} className="model-settings-history-stat"><span>{k}</span><strong>{typeof v === "number" ? v.toFixed(4) : "—"}</strong></div>
-                      ))}
+                      {r.final_metrics && Object.entries(r.final_metrics).map(([k, v]) => {
+                        if (k === "last" && v && typeof v === "object") {
+                          // 最後一輪（patience=0 跑滿時就是最後一個 epoch／boosting round）的同一組指標，
+                          // 跟頂層「最佳」分開列，不是同一個東西、不能混在同一格。
+                          return (
+                            <div key={k} className="model-settings-history-stat">
+                              <span>last（最後一輪）</span>
+                              <strong>{Object.entries(v).map(([lk, lv]) => `${lk}=${typeof lv === "number" ? lv.toFixed(4) : String(lv)}`).join("，")}</strong>
+                            </div>
+                          );
+                        }
+                        return (
+                          <div key={k} className="model-settings-history-stat">
+                            <span>{k}</span>
+                            <strong>{typeof v === "number" ? (Number.isInteger(v) ? String(v) : v.toFixed(4)) : typeof v === "boolean" ? (v ? "是" : "否") : typeof v === "object" ? JSON.stringify(v) : String(v)}</strong>
+                          </div>
+                        );
+                      })}
+                      {r.evaluation && <EvaluationSummary evaluation={r.evaluation} />}
                       {artifact && (
                         <>
                           <button
@@ -687,6 +766,13 @@ export default function ModelSettings() {
                   <span>結束日期</span>
                   <input type="date" value={inferEnd} onChange={(e) => setInferEnd(e.target.value)} />
                 </label>
+                <label className="model-settings-field">
+                  <span>權重</span>
+                  <select value={inferUseWeights} onChange={(e) => setInferUseWeights(e.target.value as "best" | "last")}>
+                    <option value="best">best（最佳）</option>
+                    <option value="last">last（最後一輪）</option>
+                  </select>
+                </label>
               </div>
               {inferError && <div className="model-settings-submit-msg is-error">{inferError}</div>}
               <div className="model-settings-submit-row">
@@ -703,12 +789,13 @@ export default function ModelSettings() {
 
 // ── 訓練模組的詳細設定表單（就是原本那份表單，現在包成單一模組用） ──────────
 function ModuleEditor({
-  module, outcomes, labelingRules, architectures, savedStrategies, indicatorRegistry, onCancel, onSave, onDelete,
+  module, outcomes, labelingRules, architectures, componentRegistries, savedStrategies, indicatorRegistry, onCancel, onSave, onDelete,
 }: {
   module: TrainingModule;
   outcomes: RegistryEntry[];
   labelingRules: RegistryEntry[];
   architectures: RegistryEntry[];
+  componentRegistries: ComponentRegistries;
   savedStrategies: SavedStrategy[];
   indicatorRegistry: RegistryGroup[];
   onCancel: () => void;
@@ -716,6 +803,9 @@ function ModuleEditor({
   onDelete?: () => void;
 }) {
   const [m, setM] = useState<TrainingModule>(module);
+  const arch = architectures.find((a) => a.key === m.architectureKey);
+  const ctx = schemaContext(m, outcomes, labelingRules);
+  const values = archFormValues(m, arch, ctx, componentRegistries);
   const [groupPickerOpen, setGroupPickerOpen] = useState(false);
   const [dateRange, setDateRange] = useState<{ min: string; max: string } | null>(null);
 
@@ -993,16 +1083,19 @@ function ModuleEditor({
             <div className="model-settings-indicator-params">
               <label>
                 <span>architecture</span>
-                <select value={m.architectureKey} onChange={(e) => setM({ ...m, architectureKey: e.target.value })} style={{ width: 120 }}>
-                  {architectures.map((a) => <option key={a.key} value={a.key}>{a.key}</option>)}
+                <select value={m.architectureKey} onChange={(e) => setM({ ...m, architectureKey: e.target.value })} style={{ width: 160 }}>
+                  {groupArchitecturesByFamily(architectures).map(([family, opts]) => (
+                    <optgroup key={family} label={family}>
+                      {opts.map((a) => <option key={a.key} value={a.key}>{a.label ?? a.key}</option>)}
+                    </optgroup>
+                  ))}
                 </select>
               </label>
               <label><span>window</span><input type="number" value={m.window} min={5} onChange={(e) => setM({ ...m, window: Number(e.target.value) })} /></label>
               <label><span>val_ratio</span><input type="number" step="0.05" value={m.valRatio} onChange={(e) => setM({ ...m, valRatio: Number(e.target.value) })} /></label>
               {/* split_strategy 不給使用者選：這個表單建立的一律是 Phase 1（random），
                   chronological 只能透過歷史紀錄的「進到 Phase 2」按鈕自動帶入，見 buildGraphSpec()。 */}
-              <label><span>epochs</span><input type="number" value={m.epochs} min={1} onChange={(e) => setM({ ...m, epochs: Number(e.target.value) })} /></label>
-              {m.labelingRuleKey === "fixed_threshold" && (
+              {ctx.task_type === "classification" && values.heads !== "dual" && (
                 <label>
                   <span>輸出</span>
                   <select value={m.outputMode} onChange={(e) => setM({ ...m, outputMode: e.target.value as "class" | "probability" })}>
@@ -1011,56 +1104,20 @@ function ModuleEditor({
                   </select>
                 </label>
               )}
-              {m.architectureKey === "lstm" && (
-                <label>
-                  <span>bidirectional</span>
-                  <input
-                    type="checkbox"
-                    checked={m.bidirectional}
-                    onChange={(e) => setM({ ...m, bidirectional: e.target.checked })}
-                  />
-                </label>
-              )}
-              {/* 架構專屬超參數：跟上面共用參數放同一個 flex-wrap 容器裡，自然換行，
-                  不另外分區塊／不加子標題——上一輪把它拆成獨立的 grid 區塊，
-                  結果在 flex 容器裡被擠成一欄窄窄的直排，比原本還醜，這輪改回最單純的做法。 */}
-              {(ARCHITECTURE_PARAM_FIELDS[m.architectureKey] ?? []).map((field) => {
-                if (field.type === "checkbox") {
-                  return (
-                    <label key={String(field.key)}>
-                      <span>{field.label}</span>
-                      <input
-                        type="checkbox"
-                        checked={m[field.key] as boolean}
-                        onChange={(e) => setM({ ...m, [field.key]: e.target.checked })}
-                      />
-                    </label>
-                  );
-                }
-                if (field.type === "select") {
-                  return (
-                    <label key={String(field.key)}>
-                      <span>{field.label}</span>
-                      <select value={m[field.key] as string} onChange={(e) => setM({ ...m, [field.key]: e.target.value })}>
-                        {field.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                      </select>
-                    </label>
-                  );
-                }
-                return (
-                  <label key={String(field.key)}>
-                    <span>{field.label}</span>
-                    <input
-                      type="number"
-                      step={field.step}
-                      value={m[field.key] as number}
-                      onChange={(e) => setM({ ...m, [field.key]: Number(e.target.value) })}
-                    />
-                  </label>
-                );
-              })}
             </div>
           </div>
+
+          {arch?.params_schema && (
+            <SchemaForm
+              heading={`${arch.label ?? arch.key} 參數`}
+              family={arch.family ?? arch.key}
+              schema={arch.params_schema}
+              values={values}
+              context={ctx}
+              registries={componentRegistries}
+              setValues={(v) => setM({ ...m, archValues: { ...m.archValues, [m.architectureKey]: v } })}
+            />
+          )}
         </div>
 
         <div className="model-settings-submit-row">

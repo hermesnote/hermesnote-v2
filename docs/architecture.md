@@ -163,6 +163,14 @@ frontend/
 - 版面設計參考真的 survey 過幾個回測平台（TradingView/QuantConnect/MetaTrader/FinLab/TEJ/Portfolio Visualizer/BigQuant/TrendSpider/Zerodha Streak）的介面做法，最後借用 TrendSpider 的遞迴群組樹、TEJ Pro 的加權模式共存、Zerodha Streak 的白話文即時預覽
 - `/admin/quant` 版面：左半 LONG／右半 SHORT，各自進場+出場兩棵樹，SHORT 有「啟用」開關（不強迫每次都要設空方策略）
 
+## 模型訓練：通用模型組裝框架（目前設計，2026-09-23）
+
+- **節點圖**：Feature Node／Label Node／Model Node 組成 DAG（`backend/training/graph.py`），Model Node 可接上游 Model Node 的具名輸出；教授三階段協定（Phase 1 random／Phase 2 chronological 繼承／Phase 3 holdout 推論）與 train-only 前處理 fit 由引擎統一處理，架構模組不碰切分。
+- **單一模型入口**：每個架構一個 key（目前 `lstm`、`xgboost`），用 `register()` 登記 `params_schema`（FieldSpec）、`capabilities`、`slots`、`outputs`；同一份 schema 驅動後台表單（`SchemaForm.tsx`）與後端驗證（`param_schema.py`），`GET /api/model/registry/architectures` 對 UI 與 Agent 公開。
+- **LSTM**：方向（單／雙向，雙向用兩方向各自最終 hidden state）× Attention（零或一個，可插拔元件 `attention.py`）× 輸出頭（單頭分類／回歸、雙頭回歸＋方向事件）三軸獨立；優化器是可共用元件（`optimizers.py`，目前 Adam），模型以 slot＋`slot_compatibility` 宣告引用、訓練經 `build_optimizer()` 建立，產物保存名稱與補齊預設後的完整設定。
+- **訓練控制**：`epochs`（神經網路）／`n_estimators`（boosting）各自表達；`early_stopping.patience=0`＝關閉；best／last 兩組權重都保存（`model_artifacts.weights`／`weights_last`）並各自完整評估（`evaluation.py`）。
+- **擴充**：新增架構／元件＝新增模組並登記，引擎、推論、API、表單不改；見 `docs/agent-api/training/extending.md`。API 手冊：`docs/agent-api/training/api.md`。
+
 ## 已完成
 
 - Hero 區塊（`src/components/Hero.tsx` / `Hero.css`，**目前未掛載在頁面上**）：品牌識別、三分頁即時渲染面板（交易系統／模型訓練／量化回測）、standby 誠實狀態、RWD 用 `clamp()` 讓寬高同時隨視窗縮放

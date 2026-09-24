@@ -17,12 +17,12 @@ from services import model_artifacts
 from services.hermesnote_db import HERMESNOTE_DATABASE_URL
 from services.quotes import fetch_ohlcv_rows
 from training import job_store
+from training.graph_refs import GraphValidationError, validate_graph_spec
 from training.inference_store import list_predictions
 from training.phases import build_phase2_graph_spec, final_model_node_id, validate_parent_for_phase
 from training.preview_store import PREVIEW_CHANNEL_PREFIX, get_preview_sample, list_preview_samples
 from training.progress import CHANNEL_PREFIX
-from training.registry import architectures, decision_rules, features, labeling_rules, outcomes
-from training.registry.labeling_rules import validate_combination
+from training.registry import architectures, decision_rules, features, labeling_rules, outcomes, target_transforms
 
 router = APIRouter(prefix="/api/model", tags=["model_training"])
 
@@ -73,18 +73,22 @@ async def start_training(body: TrainRequest):
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         graph_spec = build_phase2_graph_spec(parent_job["graph_spec"])
+        # 繼承來的圖也要再驗一次：母任務可能早於現在的驗證規則，不能假設它一定合法。
+        try:
+            validate_graph_spec(graph_spec)
+        except GraphValidationError as e:
+            raise HTTPException(status_code=400, detail=f"繼承自母任務的圖不合法：{e}")
         job_id = await job_store.create_job(graph_spec, phase=2, parent_job_id=body.parent_job_id)
         return {"job_id": job_id}
 
-    # 後端也要擋不合法的 outcome/labeling_rule 組合，不能只靠前端擋——
-    # Agent 可能直接打 API 送 graph_spec，不會經過前端表單。
-    for n in body.nodes:
-        if n.get("type") == "label":
-            try:
-                validate_combination(n["outcome"], n.get("labeling_rule", "fixed_threshold"))
-            except ValueError as e:
-                raise HTTPException(status_code=400, detail=str(e))
+    # 後端也要擋不合法的圖，不能只靠前端擋——Agent 可能直接打 API 送 graph_spec，不會經過前端表單。
+    # 所有「建立／繼承圖」的入口共用同一個驗證（training/graph_refs.py 的 validate_graph_spec），
+    # worker 撿到任務時也會再驗一次（涵蓋繞過 API 直接寫入資料庫的任務）。驗證失敗不會建立 job 列。
     graph_spec = {"start": body.start, "end": body.end, "nodes": body.nodes}
+    try:
+        validate_graph_spec(graph_spec)
+    except GraphValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     job_id = await job_store.create_job(graph_spec, phase=body.phase)
     return {"job_id": job_id}
 
@@ -219,10 +223,13 @@ class InferRequest(BaseModel):
     start: str  # 推論用的新資料區間，"YYYY-MM-DD"
     end: str
     phase: int | None = None  # 教授三階段協定：3 = Phase 3 holdout 推論；None = 一般推論，不掛三階段協定
+    use_weights: str = "best"  # "best"（預設，監控指標最好那一輪）或 "last"（最後一輪）；lstm／xgboost 都保存兩組
 
 
 @router.post("/infer")
 async def start_inference(body: InferRequest):
+    if body.use_weights not in ("best", "last"):
+        raise HTTPException(status_code=400, detail=f'use_weights 必須是 "best" 或 "last"，收到 {body.use_weights!r}')
     target_node_id = body.target_node_id
     if target_node_id is None:
         target_job = await job_store.get_job(body.target_job_id)
@@ -257,6 +264,7 @@ async def start_inference(body: InferRequest):
     infer_spec = {
         "target_job_id": body.target_job_id, "target_node_id": target_node_id,
         "start": body.start, "end": body.end,
+        "use_weights": body.use_weights,  # 一律明確記錄用了哪組權重（best／last）
     }
     job_id = await job_store.create_job(
         infer_spec, job_type="infer",
@@ -300,6 +308,22 @@ def get_labeling_rule_registry():
 @router.get("/registry/architectures")
 def get_architecture_registry():
     return architectures.list_available()
+
+
+@router.get("/registry/target_transforms")
+def get_target_transform_registry():
+    """由連續目標推導另一個學習目標（例如方向標籤）的可插拔規則，architecture 依 payload 的設定引用。"""
+    return target_transforms.list_available()
+
+
+@router.get("/registry/components/{registry}")
+def get_component_registry(registry: str):
+    """可共用元件登記表（`attention`／`optimizer`，名稱見各 architecture 的 slots[].component_registry）：
+    每一項帶自己的 params_schema 與 slot_compatibility；architecture 依 slots 宣告與登記資訊實際驗證相容性。"""
+    try:
+        return architectures.list_components(registry)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"未登記的元件登記表：{registry!r}")
 
 
 @router.get("/registry/decision_rules")

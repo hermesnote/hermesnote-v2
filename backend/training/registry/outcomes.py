@@ -13,11 +13,17 @@
 import numpy as np
 
 OUTCOME_REGISTRY: dict = {}
+# 宣告式 metadata（不參與計算）：unit 是 raw 數值的單位、signed 是「帶正負號的報酬」
+# （正負有意義，才適合拿 >=／< 門檻定義方向事件）。具名輸出的 metadata（training/output_specs.py）
+# 從這裡取單位——simple_return 是百分比、log_return 是自然對數比值，同一個 0.0 門檻在兩者
+# 上意義不同，單位必須明確記錄，不能只靠使用者記得。
+OUTCOME_META: dict = {}
 
 
-def register(key: str):
+def register(key: str, unit: str | None = None, signed: bool = False):
     def deco(fn):
         OUTCOME_REGISTRY[key] = fn
+        OUTCOME_META[key] = {"unit": unit, "signed": signed}
         return fn
     return deco
 
@@ -30,7 +36,7 @@ def _future_close(df, horizon: int):
     return close, future, n
 
 
-@register("simple_return")
+@register("simple_return", unit="percent", signed=True)
 def simple_return(df, params: dict) -> tuple[np.ndarray, int]:
     """T+horizon 收盤價相對 T 的簡單報酬率（百分比）。params: horizon（預設 1）。"""
     horizon = int(params.get("horizon", 1))
@@ -39,7 +45,7 @@ def simple_return(df, params: dict) -> tuple[np.ndarray, int]:
     return raw, n - horizon
 
 
-@register("log_return")
+@register("log_return", unit="log_ratio", signed=True)
 def log_return(df, params: dict) -> tuple[np.ndarray, int]:
     """T+horizon 收盤價相對 T 的對數報酬率。params: horizon（預設 1）。"""
     horizon = int(params.get("horizon", 1))
@@ -50,7 +56,7 @@ def log_return(df, params: dict) -> tuple[np.ndarray, int]:
     return raw, n - horizon
 
 
-@register("future_price")
+@register("future_price", unit="price", signed=False)
 def future_price(df, params: dict) -> tuple[np.ndarray, int]:
     """T+horizon 的實際收盤價（絕對值，不是相對報酬率）。params: horizon（預設 1）。
     注意：這是價格的絕對值域，不能直接套百分比門檻分類（labeling_rule 那邊會擋掉這個組合）。
@@ -62,7 +68,10 @@ def future_price(df, params: dict) -> tuple[np.ndarray, int]:
 
 def list_available() -> list[dict]:
     """給 GET /api/model/registry/outcomes 用，Swagger 自動文件化，Agent/MCP 查詢用。"""
-    return [{"key": k, "description": (fn.__doc__ or "").strip()} for k, fn in OUTCOME_REGISTRY.items()]
+    return [
+        {"key": k, "description": (fn.__doc__ or "").strip(), **OUTCOME_META.get(k, {})}
+        for k, fn in OUTCOME_REGISTRY.items()
+    ]
 
 
 def compute_outcome(key: str, df, params: dict | None = None) -> tuple[np.ndarray, int]:

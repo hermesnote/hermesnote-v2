@@ -16,21 +16,26 @@ $SMB_SHARE = "\\$NAS_HOSTNAME\web"
 $SMB_HERMES = "$SMB_SHARE\hermes"
 $LOCAL_ROOT = "$PSScriptRoot"
 
-# 確保 SMB 已掛載（已連線就跳過）
-$existing = net use 2>$null | Select-String "TRUENAS"
-if (-not $existing) {
+# 直接檢查分享是否可用；net use 清單可能沒有列出檔案總管已建立的 SMB 連線。
+# 沿用 Windows 現有連線，不為可用的分享再次指定帳號，避免系統錯誤 1219。
+if (-not (Test-Path -LiteralPath $SMB_SHARE -PathType Container -ErrorAction SilentlyContinue)) {
     Write-Host ">>> Mounting SMB share..." -ForegroundColor Cyan
-    $smbPwd = Read-Host "Enter SMB password for $NAS_SMB_USER" -AsSecureString
-    $smbPwdPlain = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-        [Runtime.InteropServices.Marshal]::SecureStringToBSTR($smbPwd)
-    )
-    net use $SMB_SHARE /user:$NAS_SMB_USER $smbPwdPlain | Out-Null
+    Write-Host ">>> SMB account: $NAS_SMB_USER; share: $SMB_SHARE"
+    # 由 net.exe 的隱藏輸入提示讀取密碼，不把明文密碼放進命令列參數。
+    & net.exe use $SMB_SHARE "*" "/user:$NAS_SMB_USER" /persistent:no
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "SMB mount failed" -ForegroundColor Red
+        Write-Host "SMB connection failed; deployment stopped." -ForegroundColor Red
+        Write-Host "If Windows reported 1219, an existing connection uses a conflicting account; this is not a password rejection." -ForegroundColor Yellow
+        Write-Host "Inspect connections in this Windows session with: Get-SmbConnection | Select ServerName,ShareName,UserName" -ForegroundColor Yellow
+        Write-Host "Existing NAS connections have not been disconnected." -ForegroundColor Yellow
+        exit 1
+    }
+    if (-not (Test-Path -LiteralPath $SMB_SHARE -PathType Container -ErrorAction SilentlyContinue)) {
+        Write-Host "SMB connected, but the web share is not accessible. Check share permissions." -ForegroundColor Red
         exit 1
     }
 } else {
-    Write-Host ">>> SMB already connected, skipping mount" -ForegroundColor DarkGray
+    Write-Host ">>> SMB share is accessible; reusing the existing Windows connection." -ForegroundColor DarkGray
 }
 
 Write-Host ">>> Checking existing containers are up before touching anything..." -ForegroundColor Cyan
@@ -62,14 +67,28 @@ if ($LASTEXITCODE -ne 0) {
 Pop-Location
 
 Write-Host ">>> Copying repo to NAS..." -ForegroundColor Cyan
+# robocopy 的結束碼是位元旗標，>=8 才是真的失敗（0-7 都是「複製/跳過了幾筆」這種正常結果）；
+# $LASTEXITCODE 只會記錄「最後一個原生執行檔」的結束碼，Copy-Item 這種 cmdlet 不會覆寫它——
+# 所以每個 robocopy 都要立刻各自檢查，不能全部跑完只在最後看一次，不然只有最後一個 robocopy
+# 的結果會被看到，前面幾個如果失敗會被靜靜蓋過去、腳本卻誤判成功繼續往下做。
+function Assert-RobocopySucceeded([string]$label) {
+    if ($LASTEXITCODE -ge 8) {
+        Write-Host "Copy to NAS failed: $label" -ForegroundColor Red
+        exit 1
+    }
+}
+
 robocopy "$LOCAL_ROOT\frontend\dist" "$SMB_HERMES\frontend\dist" /MIR /NFL /NDL /NJH /NJS
+Assert-RobocopySucceeded "frontend/dist"
 robocopy "$LOCAL_ROOT\backend" "$SMB_HERMES\backend" /MIR /XD __pycache__ .git .venv /XF "*.pyc" "*.pyo" /NFL /NDL /NJH /NJS
+Assert-RobocopySucceeded "backend"
+# docs/agent-api 是給外部 Agent（Hermes Agent 等）唯讀查閱的操作手冊，不是給任何 container
+# 消費的程式碼，跟 frontend/dist、backend 一樣單純鏡像過去，不需要重建/重啟任何容器就會生效
+# ——放在 /mnt/Hermesnote/web/hermes/docs/agent-api，跟本機這份 repo 同一個相對路徑。
+robocopy "$LOCAL_ROOT\docs\agent-api" "$SMB_HERMES\docs\agent-api" /MIR /NFL /NDL /NJH /NJS
+Assert-RobocopySucceeded "docs/agent-api"
 Copy-Item "$LOCAL_ROOT\docker-compose.yml" "$SMB_HERMES\docker-compose.yml" -Force
 Copy-Item "$LOCAL_ROOT\nginx.conf" "$SMB_HERMES\nginx.conf" -Force
-if ($LASTEXITCODE -ge 8) {
-    Write-Host "Copy to NAS failed" -ForegroundColor Red
-    exit 1
-}
 Write-Host ">>> Copy done" -ForegroundColor Green
 
 Write-Host ">>> Updating containers with new code via SSH (docker compose)..." -ForegroundColor Cyan
@@ -90,4 +109,3 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 Write-Host ">>> Deploy complete! 請對照上面 docker compose ps 印出的 CREATED 欄位，確認 backend/training 是不是剛剛才重建的，不是舊的" -ForegroundColor Green
-

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { evaluationRows, type EvaluationPair, type EvaluationReport } from "./evaluationRows";
 import { useSearchParams } from "react-router-dom";
 import {
   createChart,
@@ -27,16 +28,34 @@ type LabelNode = {
   id: string; type: "label"; outcome: string; labeling_rule: string; timeframe: string;
   params?: { horizon?: number; n_classes?: number; threshold_pct?: number };
 };
+// inputs 的每一項可以是節點 id 字串（等於 default 輸出），或具名輸出引用 {node, output}
+// （平台契約，見 backend/training/graph_refs.py）；前台管理表單仍只產生字串。
+type InputRef = string | { node: string; output: string };
+const inputNodeId = (r: InputRef): string => (typeof r === "string" ? r : r.node);
+
 type ModelNode = {
-  id: string; type: "model"; key: string; inputs: string[]; label: string;
+  id: string; type: "model"; key: string; inputs: InputRef[]; label: string;
   window: number; val_ratio: number; output_mode?: string; params?: Record<string, unknown>;
 };
 type AnyNode = FeatureNode | LabelNode | ModelNode;
 
 type JobSummary = { job_id: string; job_type: "train" | "infer"; status: "pending" | "running" | "done" | "failed"; created_at: string };
 
+// 輸出 metadata（後端 training/output_specs.py）：具名輸出實際是什麼——Outcome、單位、horizon、事件規則
+type OutputSpec = {
+  kind: string; columns: number; description?: string;
+  target?: { outcome?: string; unit?: string | null; horizon?: number };
+  event?: { op: string; threshold: number; threshold_unit: string | null };
+};
+
 type JobResultEntry = {
-  final_metrics?: Record<string, number>;
+  // 頂層是最佳（best）那一輪的驗證指標＋訓練控制摘要（monitor／patience／best_epoch 或 best_round／
+  // stopped_early…）；`last` 是最後一輪的同一組指標（巢狀物件），跟頂層分開列
+  final_metrics?: Record<string, number | string | boolean | Record<string, number>>;
+  // 完整分類／回歸評估報告，best／last 各一份（所有架構都有）
+  evaluation?: EvaluationPair | null;
+  output_specs?: Record<string, OutputSpec>;
+  output_type?: string; // infer job 才有，雙頭模型是 "dual"
   device?: string;
   training_meta?: { n_train?: number; n_val?: number; split_strategy?: string };
   // job_type==='infer' 才會有——全期間逐列結果已分批存進 model_inference_predictions，
@@ -69,7 +88,10 @@ type JobDetail = {
 type InferPrediction = {
   id: number;
   ts: number;
-  output_type: "class" | "probability" | "regression";
+  // 該樣本最後一根輸入棒的「識別時間」（棒起點）；available_ts 才是資訊可用時間（日線 08:45 的棒 13:45 才收盤）
+  available_ts?: number | null;
+  // dual＝雙頭模型：predicted 是回歸值（目標原單位）、probabilities＝[P(不符合事件), P(符合事件)]
+  output_type: "class" | "probability" | "regression" | "dual";
   predicted: number;
   probabilities: number[] | null;
 };
@@ -83,8 +105,11 @@ type WindowPreview = {
   id?: number; // 只有歷史瀏覽（查 model_training_preview_samples）回來的紀錄才有
   epoch: number;
   source: "train" | "val";
-  decision_ts: number;
+  decision_ts: number; // K 棒的識別時間（棒起點）
   target_ts: number;
+  // 資訊可用時間（日線：08:45 的棒 13:45 才收盤才有完整資訊）；資料沒有 bar_end_ts 或舊紀錄是 null
+  decision_available_ts?: number | null;
+  target_available_ts?: number | null;
   horizon: number;
   task_type: "classification" | "regression";
   n_classes: number | null;
@@ -103,6 +128,8 @@ type ProgressPoint = {
   accuracy: number | null;
   val_loss: number | null;
   val_accuracy: number | null;
+  // 擴充指標（單頭回歸：rmse／val_rmse／val_mae；雙頭：joint_loss／mse／bce／rmse／dir_acc 及其 val_ 版本）；單頭分類與 XGBoost 為 null
+  metrics?: Record<string, number> | null;
   created_at: string;
 };
 
@@ -113,6 +140,72 @@ function extractNodeId(raw: { node_id?: string; window_meta?: unknown }): string
 
 function fmt(n: number | null | undefined, digits = 4): string {
   return n === null || n === undefined ? "—" : n.toFixed(digits);
+}
+
+// 雙頭 LSTM（heads="dual"）每輪的擴充指標（後端 training/registry/lstm.py，各自有明確名稱）：
+// [key, 顯示名稱, 是否百分比]。mse／bce／joint_loss 在「損失空間」（啟用目標縮放時是縮放後的尺度），
+// rmse 一律是目標原單位。
+const DUAL_METRICS: [string, string, boolean][] = [
+  ["joint_loss", "聯合損失", false], ["mse", "MSE（損失空間）", false], ["bce", "BCE", false],
+  ["rmse", "RMSE（原單位）", false], ["dir_acc", "方向準確率", true],
+];
+function fmtDual(v: number | null | undefined, pct: boolean): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  return pct ? `${(v * 100).toFixed(2)}%` : Math.abs(v) < 0.001 && v !== 0 ? v.toExponential(3) : v.toFixed(5);
+}
+
+// 完整驗證集評估報告，best／last 各一份（所有架構都有）；預設收合，展開才畫混淆矩陣這類細節。
+function EvaluationPanel({ evaluation }: { evaluation: EvaluationPair }) {
+  const [open, setOpen] = useState(false);
+  const Block = ({ label, ev }: { label: string; ev: EvaluationReport }) => (
+    <div className="model-dual-metrics-block">
+      <div className="model-dual-metrics-title">{label}</div>
+      {evaluationRows(ev).map(([k, v]) => (
+        <div className="model-preview-info-row" key={k}><span>{k}</span><strong>{v}</strong></div>
+      ))}
+    </div>
+  );
+  return (
+    <>
+      <button type="button" className="model-epoch-toggle" onClick={() => setOpen((v) => !v)}>
+        {open ? "收起" : "展開"}完整評估報告
+      </button>
+      {open && (
+        <div className="model-dual-metrics">
+          <Block label="最佳權重（best）" ev={evaluation.best} />
+          <Block label="最後一輪權重（last）" ev={evaluation.last} />
+        </div>
+      )}
+    </>
+  );
+}
+
+// 訓練結束後的 best／last 摘要（所有架構）：訓練控制＋監控指標在最佳輪與最後一輪各自的值。
+// LSTM 用 epoch（best_epoch／epochs_run），XGBoost 用 boosting round（best_round／rounds_run）。
+function FinalModelPanel({ fm, roundNoun }: { fm: NonNullable<JobResultEntry["final_metrics"]>; roundNoun: string }) {
+  const bestIdx = fm.best_epoch ?? fm.best_round;
+  const runs = fm.epochs_run ?? fm.rounds_run;
+  const patience = Number(fm.patience ?? 0);
+  const last = (fm.last && typeof fm.last === "object" ? fm.last : {}) as Record<string, number>;
+  const valKeys = Object.keys(fm).filter((k) => k.startsWith("val_") && typeof fm[k] === "number");
+  return (
+    <div className="model-dual-metrics-block">
+      <div className="model-dual-metrics-title">
+        最終模型（best＝最佳輪權重，last＝最後一輪權重）｜
+        {patience === 0 ? "early stopping 關閉（patience=0），跑滿設定輪數" : `early stopping patience=${patience}`}
+      </div>
+      <div className="model-preview-info-row"><span>最佳{roundNoun}／實際跑了</span><strong>
+        第 {Number(bestIdx) + 1}／共 {String(runs)} {fm.stopped_early ? "（early stopping 觸發）" : "（跑滿）"}
+      </strong></div>
+      <div className="model-preview-info-row"><span>監控指標</span><strong>{String(fm.monitor ?? "—")}</strong></div>
+      {valKeys.map((k) => (
+        <div className="model-preview-info-row" key={k}>
+          <span>{k}（best／last）</span>
+          <strong>{fmtDual(fm[k] as number, k.endsWith("accuracy") || k.endsWith("dir_acc"))}／{fmtDual(last[k], k.endsWith("accuracy") || k.endsWith("dir_acc"))}</strong>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function fmtPct(n: number | null | undefined, digits = 2): string {
@@ -435,6 +528,8 @@ export default function ModelTrainingPage() {
           const preview: WindowPreview = {
             epoch: msg.epoch, source: msg.source as "train" | "val",
             decision_ts: msg.decision_ts as number, target_ts: msg.target_ts as number,
+            decision_available_ts: (msg.decision_available_ts as number | null | undefined) ?? null,
+            target_available_ts: (msg.target_available_ts as number | null | undefined) ?? null,
             horizon: msg.horizon as number, task_type: msg.task_type as "classification" | "regression",
             n_classes: (msg.n_classes as number | null) ?? null, labeling_rule: msg.labeling_rule as string | null,
             bars: msg.bars as WindowBar[], actual: msg.actual as number, predicted: msg.predicted as number,
@@ -447,6 +542,7 @@ export default function ModelTrainingPage() {
           node_id: nodeId, epoch: msg.epoch,
           loss: (msg.loss as number | null) ?? null, accuracy: (msg.accuracy as number | null) ?? null,
           val_loss: (msg.val_loss as number | null) ?? null, val_accuracy: (msg.val_accuracy as number | null) ?? null,
+          metrics: (msg.metrics as Record<string, number> | undefined) ?? null,
           created_at: new Date().toISOString(),
         };
         setProgressByNode((prev) => mergeGrouped(prev, { [nodeId]: [next] }));
@@ -862,7 +958,7 @@ export default function ModelTrainingPage() {
   );
   const modelFeatureNodes = useMemo(() => {
     if (!modelNode) return [];
-    const inputSet = new Set(modelNode.inputs);
+    const inputSet = new Set(modelNode.inputs.map(inputNodeId));
     return trainGraphSpec?.nodes.filter((n): n is FeatureNode => n.type === "feature" && inputSet.has(n.id)) ?? [];
   }, [trainGraphSpec, modelNode]);
 
@@ -875,6 +971,41 @@ export default function ModelTrainingPage() {
   const lastProgressAt = latest?.created_at ?? null;
 
   const featureLabel = (n: FeatureNode) => (n.key === "talib_indicator" ? String(n.params?.name ?? n.key) : n.key);
+
+  // LSTM 一輪是「掃過一次完整訓練集」（epoch），XGBoost 一輪是「長一棵樹」（boosting
+  // round）——兩者不是同一件事，訓練輪次的用詞要跟著模型架構走，不能都含糊叫「輪」。
+  const isXgboostNode = modelNode?.key === "xgboost";
+  // 雙頭（送出的 params.heads="dual"）：loss 欄是「聯合損失」（回歸 MSE 與方向 BCE 的加權和）、
+  // accuracy 欄是「方向準確率」，不是單頭的 CrossEntropy／分類 accuracy。
+  const isDualNode = modelNode?.params?.heads === "dual";
+  const dualWeights = modelNode?.params?.loss_weights as { regression?: number; direction?: number } | undefined;
+  const roundNoun = isXgboostNode ? "Boosting 輪次" : "Epoch";
+  // 是不是回歸任務，不能只憑 labeling_rule 的名字猜（以後可能加新的 labeling_rule），
+  // 直接看逐輪指標本身：只要曾經回報過非 null 的 accuracy/val_accuracy 就是分類；
+  // 一筆資料都還沒有時無法判斷，先當作「還不知道」，交給既有的「等待第一輪回報」文案處理，
+  // 不要在資料還沒進來前就搶先斷言這是不是回歸——那樣本身也是一種沒有根據的推論。
+  const hasAccuracySignal = progressForSelected.some((p) => p.accuracy !== null || p.val_accuracy !== null);
+  const isRegressionTask = progressForSelected.length > 0 && !hasAccuracySignal;
+  // loss 實際上是哪種損失函數，跟架構＋任務型態都有關——error/merror 那種「分類錯誤率」
+  // 跟 CrossEntropyLoss 不是同一種東西，不能含糊都標成「Loss」，見 architectures.py
+  // train_xgboost() 這輪的修正說明。回歸任務資料還沒進來前不猜測，維持純「Loss」。
+  const lossKind = !progressForSelected.length
+    ? null
+    : isDualNode
+      ? `聯合損失${dualWeights ? ` ${dualWeights.regression}×MSE＋${dualWeights.direction}×BCE` : ""}`
+    : isXgboostNode
+      ? (isRegressionTask ? "RMSE" : "LogLoss")
+      : (isRegressionTask ? "MSE" : "CrossEntropy");
+
+  // Loss/Accuracy 圖表的橫軸單位（第幾個 Epoch／第幾個 Boosting 輪次）只有在選定節點的
+  // 架構確定之後才知道，但兩張圖的 chart instance 本身只在元件掛載時建立一次（見上面
+  // createChart 那兩個 effect 的說明，容器不能條件式掛載）——這裡用 applyOptions() 在
+  // 「架構已知/改變」時，對同一個既有的 chart instance 動態更新 timeFormatter，不重建圖表。
+  useEffect(() => {
+    const timeFormatter = (t: number) => `第 ${t} 輪（${roundNoun}）`;
+    lossChartApiRef.current?.applyOptions({ localization: { timeFormatter } });
+    accChartApiRef.current?.applyOptions({ localization: { timeFormatter, priceFormatter: (p: number) => `${(p * 100).toFixed(1)}%` } });
+  }, [roundNoun]);
 
   // Loss/Accuracy 圖例：預設顯示最新一輪，滑鼠移到圖上時改顯示那一輪的 train/val 數值——
   // 兩張圖各自獨立判斷 hover 狀態。
@@ -914,7 +1045,7 @@ export default function ModelTrainingPage() {
           {job ? (
             <>
               {STATUS_LABEL[status] ?? status}
-              {totalEpochs && latest ? `｜已完成 ${latest.epoch + 1}／${totalEpochs} 輪` : ""}
+              {totalEpochs && latest ? `｜已完成 ${latest.epoch + 1}／${totalEpochs}（${roundNoun}）` : ""}
               {(status === "pending" || status === "running") && `｜最後進度回報：${secondsAgo(lastProgressAt, now)}`}
               {(status === "pending" || status === "running") && wsStatus === "error" && (
                 <span className="model-status-warn">　連線中斷，正在重新連線（訓練本身不受影響）</span>
@@ -1003,19 +1134,16 @@ export default function ModelTrainingPage() {
                 </div>
                 <div className="model-info-row"><span>architecture</span><strong>{modelNode?.key ?? "—"}</strong></div>
                 <div className="model-info-row"><span>window</span><strong>{modelNode?.window ?? "—"}</strong></div>
-                <div className="model-info-row"><span>epochs</span><strong>{String(modelNode?.params?.epochs ?? "—")}</strong></div>
-                <div className="model-info-row"><span>batch_size</span><strong>{String(modelNode?.params?.batch_size ?? "—")}</strong></div>
-                <div className="model-info-row"><span>units</span><strong>{String(modelNode?.params?.units ?? "—")}</strong></div>
-                <div className="model-info-row"><span>layers</span><strong>{String(modelNode?.params?.layers ?? "—")}</strong></div>
+                <div className="model-info-row"><span>{isXgboostNode ? "n_estimators" : "epochs"}</span><strong>{totalEpochs ?? "—"}</strong></div>
                 <div className="model-info-row"><span>Device</span><strong>{resultEntry?.device ?? job.device ?? "—"}</strong></div>
                 {modelNode?.params && (
                   <details className="model-params-detail">
-                    <summary>其他參數</summary>
-                    {Object.entries(modelNode.params)
-                      .filter(([k]) => !["epochs", "batch_size", "units", "layers", "n_classes"].includes(k))
-                      .map(([k, v]) => (
-                        <div className="model-info-row" key={k}><span>{k}</span><strong>{String(v)}</strong></div>
-                      ))}
+                    <summary>完整參數（送出的 params）</summary>
+                    {Object.entries(modelNode.params).map(([k, v]) => (
+                      <div className="model-info-row" key={k}>
+                        <span>{k}</span><strong>{v !== null && typeof v === "object" ? JSON.stringify(v) : String(v)}</strong>
+                      </div>
+                    ))}
                   </details>
                 )}
               </div>
@@ -1073,10 +1201,29 @@ export default function ModelTrainingPage() {
                 <div className="model-preview-info">
                   {selectedInferPrediction ? (
                     <>
-                      <div className="model-preview-info-row"><span>時間</span><strong>{formatPreviewTime(selectedInferPrediction.ts)}</strong></div>
+                      {selectedInferPrediction.available_ts ? (
+                        <>
+                          <div className="model-preview-info-row"><span>決策時刻（資訊可用）</span><strong>{formatPreviewTime(selectedInferPrediction.available_ts)}</strong></div>
+                          <div className="model-preview-info-row"><span>最後輸入棒（識別時間）</span><strong>{formatPreviewTime(selectedInferPrediction.ts)}</strong></div>
+                        </>
+                      ) : (
+                        <div className="model-preview-info-row"><span>時間</span><strong>{formatPreviewTime(selectedInferPrediction.ts)}</strong></div>
+                      )}
                       <div className="model-preview-info-row"><span>輸出類型</span><strong>{selectedInferPrediction.output_type}</strong></div>
-                      <div className="model-preview-info-row"><span>predicted</span><strong>{selectedInferPrediction.predicted}</strong></div>
-                      {selectedInferPrediction.probabilities && (
+                      {selectedInferPrediction.output_type === "dual" ? (
+                        <>
+                          <div className="model-preview-info-row"><span>回歸預測（目標原單位{inferResultEntry?.output_specs?.regression?.target?.unit ? `：${inferResultEntry.output_specs.regression.target.unit}` : ""}）</span><strong>{selectedInferPrediction.predicted}</strong></div>
+                          {selectedInferPrediction.probabilities && (
+                            <div className="model-preview-info-row">
+                              <span>{inferResultEntry?.output_specs?.direction_probability?.description ?? "事件機率"}</span>
+                              <strong>{(selectedInferPrediction.probabilities[1] * 100).toFixed(2)}%</strong>
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <div className="model-preview-info-row"><span>predicted</span><strong>{selectedInferPrediction.predicted}</strong></div>
+                      )}
+                      {selectedInferPrediction.output_type !== "dual" && selectedInferPrediction.probabilities && (
                         <div className="model-preview-info-row">
                           <span>機率分佈</span>
                           <strong>{selectedInferPrediction.probabilities.map((p) => `${(p * 100).toFixed(1)}%`).join(" / ")}</strong>
@@ -1112,10 +1259,10 @@ export default function ModelTrainingPage() {
                     className={`model-history-row${i === inferSelectedIdx ? " is-selected" : ""}`}
                     onClick={() => setInferSelectedIdx(i)}
                   >
-                    <span>{formatPreviewTime(p.ts)}</span>
+                    <span>{formatPreviewTime(p.available_ts ?? p.ts)}</span>
                     <span>{p.output_type}</span>
-                    <span>predicted {p.predicted}</span>
-                    <span>{p.probabilities ? p.probabilities.map((v) => `${(v * 100).toFixed(1)}%`).join(" / ") : "—"}</span>
+                    <span>{p.output_type === "dual" ? `回歸 ${p.predicted.toFixed(5)}` : `predicted ${p.predicted}`}</span>
+                    <span>{p.output_type === "dual" && p.probabilities ? `P(事件) ${(p.probabilities[1] * 100).toFixed(1)}%` : p.probabilities ? p.probabilities.map((v) => `${(v * 100).toFixed(1)}%`).join(" / ") : "—"}</span>
                   </div>
                 ))}
                 {inferHasMore && inferPredictions.length > 0 && (
@@ -1171,8 +1318,19 @@ export default function ModelTrainingPage() {
                   <>
                     <div className="model-preview-info-row"><span>來源</span><strong>{displayedPreview.source === "train" ? "訓練集 (train)" : "驗證集 (val)"}</strong></div>
                     <div className="model-preview-info-row"><span>第幾輪</span><strong>第 {displayedPreview.epoch + 1} 輪</strong></div>
-                    <div className="model-preview-info-row"><span>決策時刻 T</span><strong>{formatPreviewTime(displayedPreview.decision_ts)}</strong></div>
-                    <div className="model-preview-info-row"><span>預測目標 T+{displayedPreview.horizon}</span><strong>{formatPreviewTime(displayedPreview.target_ts)}</strong></div>
+                    {displayedPreview.decision_available_ts ? (
+                      <>
+                        {/* 日線的 08:45 只是棒的識別時間；決策時刻要用資訊可用時間（收盤後），不能標成 08:45 */}
+                        <div className="model-preview-info-row"><span>決策時刻 T（資訊可用）</span><strong>{formatPreviewTime(displayedPreview.decision_available_ts)}</strong></div>
+                        <div className="model-preview-info-row"><span>最後輸入棒（識別時間）</span><strong>{formatPreviewTime(displayedPreview.decision_ts)}</strong></div>
+                        <div className="model-preview-info-row"><span>預測目標 T+{displayedPreview.horizon}（資訊可用）</span><strong>{formatPreviewTime(displayedPreview.target_available_ts ?? displayedPreview.target_ts)}</strong></div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="model-preview-info-row"><span>決策時刻 T</span><strong>{formatPreviewTime(displayedPreview.decision_ts)}</strong></div>
+                        <div className="model-preview-info-row"><span>預測目標 T+{displayedPreview.horizon}</span><strong>{formatPreviewTime(displayedPreview.target_ts)}</strong></div>
+                      </>
+                    )}
                     <div className="model-preview-info-row"><span>預測</span><strong>{formatPreviewValue(displayedPreview.predicted, displayedPreview.task_type, displayedPreview.n_classes, displayedPreview.labeling_rule)}</strong></div>
                     <div className="model-preview-info-row"><span>實際答案</span><strong>{formatPreviewValue(displayedPreview.actual, displayedPreview.task_type, displayedPreview.n_classes, displayedPreview.labeling_rule)}</strong></div>
                     {displayedPreview.task_type === "classification" && (
@@ -1225,44 +1383,67 @@ export default function ModelTrainingPage() {
               <div className="model-left-title">訓練指標</div>
               {job && totalEpochs && latest && (status === "pending" || status === "running") && (
                 <div className="model-compact-progress">
-                  正在第 {latest.epoch + 1}／{totalEpochs} 輪｜最後回報：{secondsAgo(lastProgressAt, now)}
+                  正在第 {latest.epoch + 1}／{totalEpochs}（{roundNoun}）｜最後回報：{secondsAgo(lastProgressAt, now)}
                 </div>
               )}
             </div>
             <div className="model-progress-charts">
               <div className="model-progress-chart-block">
-                <div className="model-chart-label">Loss</div>
+                <div className="model-chart-label">Loss{lossKind && `（${lossKind}）`}</div>
                 <div className="model-progress-chart-inner">
                   {job && progressForSelected.length === 0 && (status === "pending" || status === "running") && (
-                    <div className="model-progress-waiting">等待第一輪回報…</div>
+                    <div className="model-progress-waiting">等待第一{roundNoun}回報…</div>
                   )}
                   {job && progressForSelected.length > 0 && (
                     <div className="model-chart-legend">
                       <span className="model-legend-item"><i className="model-legend-swatch is-solid" style={{ background: "#f0616b" }} />train {fmt(lossLegendPoint?.loss, 4)}</span>
                       <span className="model-legend-item"><i className="model-legend-swatch is-dashed" style={{ borderColor: "#f0a13a" }} />val {fmt(lossLegendPoint?.val_loss, 4)}</span>
-                      {lossLegendPoint && <span className="model-legend-epoch">第 {lossLegendPoint.epoch + 1} 輪</span>}
+                      {lossLegendPoint && <span className="model-legend-epoch">第 {lossLegendPoint.epoch + 1}（{roundNoun}）</span>}
                     </div>
                   )}
                   <div ref={lossChartRef} className="model-progress-chart" />
                 </div>
               </div>
               <div className="model-progress-chart-block">
-                <div className="model-chart-label">Accuracy</div>
+                <div className="model-chart-label">{isDualNode ? "方向準確率（dir_acc，機率 0.5 為界）" : "Accuracy"}</div>
                 <div className="model-progress-chart-inner">
                   {job && progressForSelected.length === 0 && (status === "pending" || status === "running") && (
-                    <div className="model-progress-waiting">等待第一輪回報…</div>
+                    <div className="model-progress-waiting">等待第一{roundNoun}回報…</div>
                   )}
-                  {job && progressForSelected.length > 0 && (
+                  {/* 回歸任務沒有 accuracy 這種東西，不虛構一個數字、也不留一張看起來像是
+                      壞掉／永遠等不到資料的空圖表——直接明講這裡不適用，改看 Loss 那張。 */}
+                  {job && isRegressionTask && (
+                    <div className="model-progress-waiting">此為回歸任務，沒有 Accuracy 指標，請參考左側 Loss（{lossKind}）</div>
+                  )}
+                  {job && progressForSelected.length > 0 && !isRegressionTask && (
                     <div className="model-chart-legend">
                       <span className="model-legend-item"><i className="model-legend-swatch is-solid" style={{ background: "#3ecf8e" }} />train {fmtPct(accLegendPoint?.accuracy)}</span>
                       <span className="model-legend-item"><i className="model-legend-swatch is-dashed" style={{ borderColor: "#3ab0cf" }} />val {fmtPct(accLegendPoint?.val_accuracy)}</span>
-                      {accLegendPoint && <span className="model-legend-epoch">第 {accLegendPoint.epoch + 1} 輪</span>}
+                      {accLegendPoint && <span className="model-legend-epoch">第 {accLegendPoint.epoch + 1}（{roundNoun}）</span>}
                     </div>
                   )}
-                  <div ref={accChartRef} className="model-progress-chart" />
+                  <div ref={accChartRef} className="model-progress-chart" style={isRegressionTask ? { display: "none" } : undefined} />
                 </div>
               </div>
             </div>
+
+            {job && ((isDualNode && latest?.metrics) || resultEntry?.final_metrics) && (
+              <div className="model-dual-metrics">
+                {isDualNode && latest?.metrics && (
+                  <div className="model-dual-metrics-block">
+                    <div className="model-dual-metrics-title">最新一輪（train／val）</div>
+                    {DUAL_METRICS.map(([key, label, pct]) => (
+                      <div className="model-preview-info-row" key={key}>
+                        <span>{label}</span>
+                        <strong>{fmtDual(latest.metrics?.[key], pct)}／{fmtDual(latest.metrics?.[`val_${key}`], pct)}</strong>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {resultEntry?.final_metrics && <FinalModelPanel fm={resultEntry.final_metrics} roundNoun={roundNoun} />}
+                {resultEntry?.evaluation && <EvaluationPanel evaluation={resultEntry.evaluation} />}
+              </div>
+            )}
 
             {job && (
               <>
@@ -1271,18 +1452,37 @@ export default function ModelTrainingPage() {
                 </button>
                 {showFullEpochList && (
                   <div className="model-epoch-list">
-                    <div className="model-epoch-row model-epoch-header">
-                      <span>epoch</span><span>loss</span><span>accuracy</span><span>val_loss</span><span>val_accuracy</span>
-                    </div>
-                    {progressForSelected.map((p) => (
-                      <div className="model-epoch-row" key={p.epoch}>
-                        <span>{p.epoch}</span>
-                        <span>{fmt(p.loss)}</span>
-                        <span>{fmtPct(p.accuracy)}</span>
-                        <span>{fmt(p.val_loss)}</span>
-                        <span>{fmtPct(p.val_accuracy)}</span>
-                      </div>
-                    ))}
+                    {isDualNode ? (
+                      <>
+                        <div className="model-epoch-row model-epoch-header model-epoch-row-dual">
+                          <span>epoch</span>{DUAL_METRICS.flatMap(([key]) => [<span key={key}>{key}</span>, <span key={`v${key}`}>val_{key}</span>])}
+                        </div>
+                        {progressForSelected.map((p) => (
+                          <div className="model-epoch-row model-epoch-row-dual" key={p.epoch}>
+                            <span>{p.epoch}</span>
+                            {DUAL_METRICS.flatMap(([key, , pct]) => [
+                              <span key={key}>{fmtDual(p.metrics?.[key], pct)}</span>,
+                              <span key={`v${key}`}>{fmtDual(p.metrics?.[`val_${key}`], pct)}</span>,
+                            ])}
+                          </div>
+                        ))}
+                      </>
+                    ) : (
+                      <>
+                        <div className="model-epoch-row model-epoch-header">
+                          <span>epoch</span><span>loss</span><span>accuracy</span><span>val_loss</span><span>val_accuracy</span>
+                        </div>
+                        {progressForSelected.map((p) => (
+                          <div className="model-epoch-row" key={p.epoch}>
+                            <span>{p.epoch}</span>
+                            <span>{fmt(p.loss)}</span>
+                            <span>{fmtPct(p.accuracy)}</span>
+                            <span>{fmt(p.val_loss)}</span>
+                            <span>{fmtPct(p.val_accuracy)}</span>
+                          </div>
+                        ))}
+                      </>
+                    )}
                   </div>
                 )}
               </>

@@ -15,6 +15,8 @@ I-001-H-002），不是設計選項：
 
 import copy
 
+from training.graph_refs import upstream_model_ids
+
 
 def final_model_node_id(nodes: list[dict]) -> str:
     """找出這張圖裡「沒有被其他 model node 當上游依賴」的那個 model node——
@@ -27,7 +29,7 @@ def final_model_node_id(nodes: list[dict]) -> str:
     referenced: set[str] = set()
     for n in nodes:
         if n["type"] == "model":
-            referenced |= {i for i in n.get("inputs", []) if i in model_ids}
+            referenced |= set(upstream_model_ids(n, model_ids))
     finals = model_ids - referenced
     if len(finals) != 1:
         raise ValueError(

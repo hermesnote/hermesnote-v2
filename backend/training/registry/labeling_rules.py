@@ -23,9 +23,15 @@ ILLEGAL_COMBINATIONS: dict[str, dict[str, str]] = {
 }
 
 
-def register(key: str):
+# 宣告式 metadata：這個規則會產生的 task_type。graph_refs.validate_graph_spec 需要在「還沒有資料」的提交階段
+# 就知道 task_type（describe_outputs 依它描述輸出），不能等 apply_labeling_rule 真的跑完才知道。
+LABELING_RULE_TASK_TYPE: dict = {}
+
+
+def register(key: str, task_type: str | None = None):
     def deco(fn):
         LABELING_RULE_REGISTRY[key] = fn
+        LABELING_RULE_TASK_TYPE[key] = task_type
         return fn
     return deco
 
@@ -37,7 +43,7 @@ def validate_combination(outcome_key: str, labeling_rule_key: str) -> None:
         raise ValueError(f"不合法的組合：outcome={outcome_key!r} + labeling_rule={labeling_rule_key!r}：{reason}")
 
 
-@register("fixed_threshold")
+@register("fixed_threshold", task_type="classification")
 def fixed_threshold(raw: np.ndarray, valid_length: int, params: dict) -> tuple[np.ndarray, str, dict]:
     """固定門檻分類。params: n_classes（2=漲/不漲，3=跌/平/漲，預設 2）、
     threshold_pct（漲跌幅門檻，二分類跟三分類都吃這個參數，預設 0.0）。
@@ -58,7 +64,7 @@ def fixed_threshold(raw: np.ndarray, valid_length: int, params: dict) -> tuple[n
     return y, "classification", {"n_classes": n_classes}
 
 
-@register("identity")
+@register("identity", task_type="regression")
 def identity(raw: np.ndarray, valid_length: int, params: dict) -> tuple[np.ndarray, str, dict]:
     """回歸：不轉換，直接把 outcome 的原始數值當學習目標。"""
     y = raw.copy()
@@ -68,7 +74,10 @@ def identity(raw: np.ndarray, valid_length: int, params: dict) -> tuple[np.ndarr
 
 def list_available() -> list[dict]:
     """給 GET /api/model/registry/labeling_rules 用，Swagger 自動文件化，Agent/MCP 查詢用。"""
-    return [{"key": k, "description": (fn.__doc__ or "").strip()} for k, fn in LABELING_RULE_REGISTRY.items()]
+    return [
+        {"key": k, "description": (fn.__doc__ or "").strip(), "task_type": LABELING_RULE_TASK_TYPE.get(k)}
+        for k, fn in LABELING_RULE_REGISTRY.items()
+    ]
 
 
 def apply_labeling_rule(key: str, raw: np.ndarray, valid_length: int, params: dict | None = None):

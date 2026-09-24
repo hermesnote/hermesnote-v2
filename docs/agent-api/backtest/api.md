@@ -96,6 +96,18 @@
 
 一般驗證回測邏輯對不對，看 `summary` 的統計數字通常就夠，不需要把幾十萬筆交易明細全部撈回來自己算一次。
 
+## `DELETE /api/backtest/jobs/{job_id}`
+
+刪掉一筆回測任務（含結果）。找不到回 404。回應：`{ "deleted": true }`。
+
+## 收藏策略（給模型訓練 Feature Node 選用）
+
+收藏的是這筆回測**當初送出的條件樹**，不是回測結果本身——收藏之後，模型訓練那邊的 Feature Node 可以選用這棵條件樹當特徵來源（策略訊號當特徵）。
+
+- `POST /api/backtest/jobs/{job_id}/save`，body `{"name": "我的策略名稱"}`（`name` 可省略）→ `{ "saved_id": "..." }`；`job_id` 找不到回 404。
+- `DELETE /api/backtest/jobs/{job_id}/save` — 用 `job_id` 取消收藏（不用自己記 `saved_id`）；這筆從沒被收藏過會回 404。
+- `GET /api/backtest/saved-strategies` — 列出所有已收藏的策略，給模型訓練那邊的 Feature Node 選單用。
+
 ## 完整範例（curl）
 
 ```bash

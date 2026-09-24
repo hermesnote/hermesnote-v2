@@ -48,7 +48,10 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
-from training.registry.architectures import train_model
+from training.graph_refs import input_refs
+from training.output_specs import DEFAULT_OUTPUT, check_output_shape
+from training.registry.architectures import LAZY_WINDOW_ARCHS, describe_outputs, train_model
+from training.time_semantics import available_at, build_available_map, model_available_map, to_unix
 from training.registry.features import compute_feature
 from training.registry.labeling_rules import apply_labeling_rule, validate_combination
 from training.registry.outcomes import compute_outcome
@@ -102,8 +105,8 @@ def _topo_order(nodes: dict) -> list[str]:
         node = nodes.get(nid)
         if node is None:
             raise ValueError(f"找不到節點：{nid}")
-        for dep in node.get("inputs", []) or []:
-            visit(dep, stack | {nid})
+        for ref in input_refs(node):
+            visit(ref.node, stack | {nid})
         if node.get("label"):
             visit(node["label"], stack | {nid})
         visited.add(nid)
@@ -146,9 +149,22 @@ def run_graph(
     order = _topo_order(nodes)
 
     outputs: dict = {}
+    # 節點 id -> 「識別時間 → 資訊可用時間」的 Series，或 None（未知）。Feature／Label 取自各自資料的 bar_end_ts，
+    # Model 取自它自己所有輸入的最晚可用時間（沿依賴鏈傳遞，見 training/time_semantics.py）。
+    avail_maps: dict = {}
+    # 具名輸出（default 以外）：{(節點 id, 輸出名): (n, k) 陣列}。default 仍存在 outputs[節點 id]，
+    # 單輸出模型只有 default，行為跟這個機制加進來之前完全一樣。
+    named_outputs: dict = {}
     timestamps: dict = {}
     label_task_types: dict = {}
     results: dict = {}
+
+    def _resolve(ref):
+        if ref.output == DEFAULT_OUTPUT:
+            return outputs[ref.node]
+        if (ref.node, ref.output) not in named_outputs:
+            raise ValueError(f"找不到節點 {ref.node} 的輸出 {ref.output!r}")
+        return named_outputs[(ref.node, ref.output)]
 
     for nid in order:
         node = nodes[nid]
@@ -158,6 +174,7 @@ def run_graph(
             df = _ensure_time_indexed(data_loader(node["timeframe"]))
             outputs[nid] = compute_feature(node["key"], df, node.get("params"))
             timestamps[nid] = np.asarray(df.index.values)
+            avail_maps[nid] = build_available_map(df)
 
         elif ntype == "label":
             df = _ensure_time_indexed(data_loader(node["timeframe"]))
@@ -169,12 +186,16 @@ def run_graph(
             y, task_type, _meta = apply_labeling_rule(rule_key, raw, valid_length, params)
             outputs[nid] = (y, valid_length)
             timestamps[nid] = np.asarray(df.index.values)
+            avail_maps[nid] = build_available_map(df)  # 目標資料自己的可用時間，不借用 Feature 的
             label_task_types[nid] = task_type
 
         elif ntype == "model":
-            input_ids = node["inputs"]
-            input_arrays = [outputs[i] for i in input_ids]
-            input_ts = [timestamps[i] for i in input_ids]
+            # 依 inputs 的原始順序串接（欄位順序 = 這個順序，推論端 inference.py 用同一個解析器
+            # 走同一個順序，兩邊才會對得上）。
+            refs = input_refs(node)
+            input_ids = [r.node for r in refs]
+            input_arrays = [_resolve(r) for r in refs]
+            input_ts = [timestamps[r.node] for r in refs]
 
             y_raw, valid_length = outputs[node["label"]]
             label_ts = timestamps[node["label"]]
@@ -222,6 +243,10 @@ def run_graph(
                 raise ValueError(f"節點 {nid}：資料筆數不足以組出任何一個 window={window} 的樣本")
             n_samples = n - window
             sample_ts = common_ts[window - 1:n - 1]
+            # 樣本的「資訊可用時間」：輸入最後一根棒收盤後才有完整資訊（日線 datetime 是 08:45，
+            # bar_end_ts 是 13:45）。只用來標時間，不參與計算與切分；資料沒有 bar_end_ts 就是 None。
+            # 全部輸入（Feature 與上游 Model）取最晚可用時間；任一未知就是 None。
+            avail_common = available_at([avail_maps.get(r.node) for r in refs], common_ts)
             y = y_common[window - 1:n - 1]
             y = np.asarray(y, dtype=(int if task_type == "classification" else float))
 
@@ -234,6 +259,8 @@ def run_graph(
             horizon = int((label_node.get("params") or {}).get("horizon", 1))
             label_end_pos = np.clip(np.arange(window, n) - 1 + horizon, 0, len(common_ts) - 1)
             label_end_ts = common_ts[label_end_pos]
+            # 目標的資訊可用時間取自 Label 節點自己資料在目標那根棒的 bar_end_ts（不是 Feature 的）
+            target_avail = available_at([avail_maps.get(node["label"])], label_end_ts)
 
             split_strategy = node.get("split_strategy", "random")
             val_ratio = float(node.get("val_ratio", 0.2))
@@ -341,6 +368,9 @@ def run_graph(
                         "source": source,
                         "decision_ts": int(pd.Timestamp(common_ts[pos + window - 1]).timestamp()),
                         "target_ts": int(pd.Timestamp(label_end_ts[pos]).timestamp()),
+                        # decision_ts／target_ts 是棒的識別時間（起點）；available 才是資訊可用時間
+                        "decision_available_ts": to_unix(avail_common[pos + window - 1]) if avail_common is not None else None,
+                        "target_available_ts": to_unix(target_avail[pos]) if target_avail is not None else None,
                         "horizon": horizon,
                         "task_type": task_type,
                         "n_classes": n_classes_for_preview,
@@ -362,7 +392,7 @@ def run_graph(
             # LSTM 用 LazyWindowed，不整包攤開訓練/驗證集（見類別上的說明，這是這次
             # OOM 崩潰的真正修法）；XGBoost 的 sklearn API 需要真正的 2D 陣列，維持原本
             # 整包攤開的作法，這條路徑目前還是有同樣的潛在風險，先不動。
-            if node["key"] == "lstm":
+            if node["key"] in LAZY_WINDOW_ARCHS:
                 X_train_arg = LazyWindowed(X_raw_norm, train_idx, window)
                 X_val_arg = LazyWindowed(X_raw_norm, val_idx, window)
             else:
@@ -374,6 +404,8 @@ def run_graph(
                 node.get("params", {}), _on_epoch,
                 task_type=task_type,
                 preview_hook=preview_hook,
+                # 類別數由 Label 決定（fixed_threshold 的 n_classes），不是模型參數——同一件事只在一個地方宣告
+                n_classes=int((label_node.get("params") or {}).get("n_classes", 2)) if task_type == "classification" else None,
             )
             # training_meta 記錄實際切分方式跟排除原因，供之後 UI／job 紀錄查詢用，不影響訓練本身。
             model_result["training_meta"] = {
@@ -381,12 +413,21 @@ def run_graph(
                 "n_train": len(train_idx), "n_val": len(val_idx),
                 "n_excluded_boundary": n_excluded_boundary,
                 "preprocessing": "minmax",
+                # 樣本 ts = 輸入最後一根棒的識別時間（棒起點）；available_ts 有值代表預覽／推論
+                # 另外帶了資訊可用時間（見 training/time_semantics.py）
+                "time_semantics": {"sample_ts": "bar_start_of_last_input_bar", "available_ts": avail_common is not None,
+                                   "target_available_ts": target_avail is not None},
             }
             model_result["task_type"] = task_type
             model_result["prediction_source"] = prediction_source.tolist()
             model_result["preprocessing_state"] = {
                 "method": "minmax", "min": feat_min.tolist(), "scale": feat_scale.tolist(),
             }
+            # 具名輸出的 metadata：依這個節點的實際設定描述（含 Outcome／單位／horizon／事件規則），
+            # 存進 model_config 跟著模型產物走（推論載入時據此驗證下游引用的輸出）、也放進 job 摘要。
+            specs = describe_outputs(node["key"], node, label_node, task_type)
+            model_result["output_specs"] = specs
+            model_result.setdefault("model_config", {})["output_specs"] = specs
             results[nid] = model_result
             # 下游節點如果要接這個模型的輸出，用「對自己全範圍窗格跑一次預測」當特徵陣列，
             # 每一列對應 sample_ts 裡同一個位置的時間戳（該窗格最後一根K棒的時間）。
@@ -399,6 +440,24 @@ def run_graph(
                 full_predictions = model_result["predict"](X)
                 outputs[nid] = np.asarray(full_predictions, dtype=float).reshape(-1, 1)
             timestamps[nid] = np.asarray(sample_ts)
+            # 這個模型的輸出對下游的可用時間：它自己每個樣本的決策可用時間（全部輸入的最晚者）
+            avail_maps[nid] = model_available_map(
+                sample_ts, avail_common[window - 1:n - 1] if avail_common is not None else None,
+            )
+            # 宣告的欄數要跟實際輸出一致（契約檢查，不一致代表 describe_outputs 跟行為漂移了）
+            check_output_shape(nid, DEFAULT_OUTPUT, specs[DEFAULT_OUTPUT], outputs[nid], len(sample_ts))
+
+            # default 以外的具名輸出：architecture 需提供 predict_outputs(X) -> {輸出名: 陣列}
+            extra_names = [name for name in specs if name != DEFAULT_OUTPUT]
+            if extra_names:
+                if "predict_outputs" not in model_result:
+                    raise ValueError(f"節點 {nid}：architecture {node['key']!r} 宣告了具名輸出 {extra_names}，但沒有提供 predict_outputs")
+                extra = model_result["predict_outputs"](X)
+                for name in extra_names:
+                    arr = np.asarray(extra[name], dtype=float)
+                    arr = arr.reshape(-1, 1) if arr.ndim == 1 else arr
+                    check_output_shape(nid, name, specs[name], arr, len(sample_ts))
+                    named_outputs[(nid, name)] = arr
 
         else:
             raise ValueError(f"未知節點類型：{ntype}")

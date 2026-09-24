@@ -17,6 +17,9 @@ import os
 import psycopg2
 from dotenv import load_dotenv
 
+from training import json_safe
+from training.graph_refs import input_refs, upstream_model_ids
+
 load_dotenv()
 
 _SYNC_DATABASE_URL = os.getenv("HERMESNOTE_DATABASE_URL", "").replace("postgresql+asyncpg://", "postgresql://")
@@ -37,8 +40,11 @@ def save_artifacts_for_job(job_id: str, graph_spec: dict, results: dict) -> None
                 if "weights" not in result or "model_config" not in result:
                     continue  # 這個架構這次沒回傳可保存的權重（理論上不會發生，防呆）
                 node = nodes[nid]
-                feature_ids = [i for i in node["inputs"] if nodes[i]["type"] == "feature"]
-                depends_on_node_ids = [i for i in node["inputs"] if i in model_node_ids]
+                # 用共用的引用解析器（inputs 可能含 {node, output} 具名引用）；depends_on_node_ids 仍是
+                # 節點 id 清單（依出現順序、去重）——每條邊選了哪個輸出，記在 graph_spec_snapshot 的 inputs 裡，
+                # 推論端從那裡讀，不需要另外的欄位或 DDL。
+                feature_ids = [r.node for r in input_refs(node) if nodes[r.node]["type"] == "feature"]
+                depends_on_node_ids = upstream_model_ids(node, model_node_ids)
                 feature_schema = [nodes[i] for i in feature_ids]
                 label_node = nodes[node["label"]]
                 target_spec = {
@@ -46,27 +52,32 @@ def save_artifacts_for_job(job_id: str, graph_spec: dict, results: dict) -> None
                     "labeling_rule": label_node.get("labeling_rule", "fixed_threshold"),
                     "params": label_node.get("params", {}),
                 }
+                # weights＝best（監控指標最好那一輪）、weights_last＝最後一輪；所有架構都回傳兩組
+                # （欄位由 migrations/2026-09-23_weights_last_and_evaluation.sql 新增，部署前必須先套用）
+                weights_last = result.get("weights_last")
+                values = [
+                    job_id, nid, node["key"], result.get("task_type", "classification"),
+                    psycopg2.Binary(result["weights"]),
+                    psycopg2.Binary(weights_last) if weights_last is not None else None,
+                    json_safe.dumps(result["model_config"]),
+                    json.dumps(feature_schema), json.dumps(target_spec), json.dumps(graph_spec),
+                    json.dumps(result.get("preprocessing_state", {"method": "none"})),
+                    json.dumps(depends_on_node_ids),
+                ]
                 cur.execute(
                     """
-                    INSERT INTO model_artifacts
-                        (job_id, node_id, architecture_key, task_type, weights, model_config,
-                         feature_schema, target_spec, graph_spec_snapshot, preprocessing_state,
-                         depends_on_node_ids)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO model_artifacts (job_id, node_id, architecture_key, task_type, weights, weights_last,
+                        model_config, feature_schema, target_spec, graph_spec_snapshot, preprocessing_state,
+                        depends_on_node_ids)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (job_id, node_id) DO UPDATE SET
-                        weights = EXCLUDED.weights, model_config = EXCLUDED.model_config,
-                        feature_schema = EXCLUDED.feature_schema, target_spec = EXCLUDED.target_spec,
-                        graph_spec_snapshot = EXCLUDED.graph_spec_snapshot,
+                        weights = EXCLUDED.weights, weights_last = EXCLUDED.weights_last,
+                        model_config = EXCLUDED.model_config, feature_schema = EXCLUDED.feature_schema,
+                        target_spec = EXCLUDED.target_spec, graph_spec_snapshot = EXCLUDED.graph_spec_snapshot,
                         preprocessing_state = EXCLUDED.preprocessing_state,
                         depends_on_node_ids = EXCLUDED.depends_on_node_ids
                     """,
-                    (
-                        job_id, nid, node["key"], result.get("task_type", "classification"),
-                        psycopg2.Binary(result["weights"]), json.dumps(result["model_config"]),
-                        json.dumps(feature_schema), json.dumps(target_spec), json.dumps(graph_spec),
-                        json.dumps(result.get("preprocessing_state", {"method": "none"})),
-                        json.dumps(depends_on_node_ids),
-                    ),
+                    values,
                 )
     finally:
         conn.close()
@@ -80,19 +91,15 @@ def load_artifact(job_id: str, node_id: str) -> dict | None:
     conn = psycopg2.connect(_SYNC_DATABASE_URL)
     try:
         with conn.cursor() as cur:
+            keys = ["architecture_key", "task_type", "weights", "weights_last", "model_config", "feature_schema",
+                    "target_spec", "graph_spec_snapshot", "depends_on_node_ids", "preprocessing_state"]
             cur.execute(
-                """
-                SELECT architecture_key, task_type, weights, model_config, feature_schema,
-                       target_spec, graph_spec_snapshot, depends_on_node_ids, preprocessing_state
-                FROM model_artifacts WHERE job_id = %s AND node_id = %s
-                """,
+                f"SELECT {', '.join(keys)} FROM model_artifacts WHERE job_id = %s AND node_id = %s",
                 (job_id, node_id),
             )
             row = cur.fetchone()
             if row is None:
                 return None
-            keys = ["architecture_key", "task_type", "weights", "model_config", "feature_schema",
-                    "target_spec", "graph_spec_snapshot", "depends_on_node_ids", "preprocessing_state"]
             return dict(zip(keys, row))
     finally:
         conn.close()

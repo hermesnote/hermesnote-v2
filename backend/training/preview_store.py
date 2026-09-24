@@ -76,8 +76,10 @@ def _write_sample_sync(job_id: str, node_id: str, preview: dict) -> None:
                 """
                 INSERT INTO model_training_preview_samples
                     (job_id, node_id, epoch, source, decision_ts, target_ts, horizon,
-                     task_type, n_classes, labeling_rule, bars, actual, predicted)
-                VALUES (%s, %s, %s, %s, to_timestamp(%s), to_timestamp(%s), %s, %s, %s, %s, %s, %s, %s)
+                     task_type, n_classes, labeling_rule, bars, actual, predicted,
+                     decision_available_ts, target_available_ts)
+                VALUES (%s, %s, %s, %s, to_timestamp(%s), to_timestamp(%s), %s, %s, %s, %s, %s, %s, %s,
+                        to_timestamp(%s), to_timestamp(%s))
                 RETURNING id
                 """,
                 (
@@ -85,6 +87,7 @@ def _write_sample_sync(job_id: str, node_id: str, preview: dict) -> None:
                     preview["decision_ts"], preview["target_ts"], preview["horizon"],
                     preview["task_type"], preview["n_classes"], preview.get("labeling_rule"),
                     json.dumps(preview["bars"]), preview["actual"], preview["predicted"],
+                    preview.get("decision_available_ts"), preview.get("target_available_ts"),
                 ),
             )
             sample_id = cur.fetchone()[0]
@@ -110,13 +113,21 @@ def save_preview_sample(job_id: str, node_id: str, preview: dict) -> None:
             print(f"[preview_store] 預覽佇列已滿，已丟棄 {_dropped_count} 筆（累計），DB 可能忙碌或太慢", flush=True)
 
 
+def _unix_or_none(value):
+    return int(value.timestamp()) if value is not None else None
+
+
 def _row_to_dict(row) -> dict:
+    # decision_ts／target_ts 是 K 棒的識別時間（棒起點）；*_available_ts 才是資訊可用時間
+    # （日線：08:45 的棒要 13:45 收盤才完整），欄位由 2026-09-21 遷移新增，舊列是 NULL。
     return {
         "id": row["id"], "node_id": row["node_id"], "epoch": row["epoch"], "source": row["source"],
         "decision_ts": int(row["decision_ts"].timestamp()), "target_ts": int(row["target_ts"].timestamp()),
         "horizon": row["horizon"], "task_type": row["task_type"], "n_classes": row["n_classes"],
         "labeling_rule": row["labeling_rule"], "bars": json.loads(row["bars"]),
         "actual": row["actual"], "predicted": row["predicted"],
+        "decision_available_ts": _unix_or_none(row.get("decision_available_ts")),
+        "target_available_ts": _unix_or_none(row.get("target_available_ts")),
         "created_at": row["created_at"].isoformat(),
     }
 

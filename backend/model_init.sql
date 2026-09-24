@@ -120,3 +120,18 @@ CREATE INDEX IF NOT EXISTS idx_model_inference_predictions_job_node_id
 -- 理論上不會有既有列需要這個預設值），不影響 inference_store.py 寫入時一律明確指定值。
 ALTER TABLE model_inference_predictions ADD COLUMN IF NOT EXISTS output_type TEXT NOT NULL DEFAULT 'class';
 ALTER TABLE model_inference_predictions ADD COLUMN IF NOT EXISTS probabilities JSONB;
+
+-- 2026-09-21（Attention＋雙頭 LSTM 能力擴充）新增的欄位，語意見 migrations/2026-09-21_attention_dual_head.sql。
+-- 既有環境請用該遷移檔；這裡放同樣的 idempotent 語句，讓從頭建置的環境跟遷移後的環境一致。
+ALTER TABLE model_training_progress ADD COLUMN IF NOT EXISTS metrics JSONB;
+ALTER TABLE model_training_preview_samples ADD COLUMN IF NOT EXISTS decision_available_ts TIMESTAMPTZ;
+ALTER TABLE model_training_preview_samples ADD COLUMN IF NOT EXISTS target_available_ts TIMESTAMPTZ;
+ALTER TABLE model_inference_predictions ADD COLUMN IF NOT EXISTS available_ts TIMESTAMPTZ;
+
+-- 2026-09-23（best／last 雙權重）新增的欄位，語意見 migrations/2026-09-23_weights_last_and_evaluation.sql
+-- （training/artifacts.py 無條件讀寫此欄，部署前必須先套用）。
+ALTER TABLE model_artifacts ADD COLUMN IF NOT EXISTS weights_last BYTEA;
+
+-- （2026-09-23 週日 scrub 維護閘門的 model_training_checkpoints 建表語句已隨功能撤回移除
+--  ——那個遷移同樣從未套用過正式庫，撤回範圍內的東西不留在 schema 定義檔裡，見
+--  docs/record/archive/2026-09-23-scrub-withdrawal-and-lstm-custom.md。）

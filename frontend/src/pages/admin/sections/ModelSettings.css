@@ -669,3 +669,27 @@
   flex-direction: column;
   gap: 18px;
 }
+
+/* 「重跑」：跟刪除同尺寸，但 hover 不用紅色（紅色是破壞性操作的語意） */
+.model-settings-history-rerun:hover {
+  color: var(--ink);
+  border-color: var(--ink-soft);
+}
+
+/* Attention＋雙頭 LSTM 設定區塊的說明文字：跟欄位標籤同一排，字體小、顏色淡，不搶輸入框注意力 */
+.model-settings-hint {
+  font-size: 0.72rem;
+  color: var(--ink-faint);
+  line-height: 1.5;
+  max-width: 100%;
+}
+
+.model-settings-eval-block {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}

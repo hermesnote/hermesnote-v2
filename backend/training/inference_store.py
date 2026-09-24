@@ -9,6 +9,15 @@ output_type 決定怎麼解讀 predicted/probabilities 這兩欄：
   'probability' — predict_proba 的完整機率向量，predicted 是 argmax 類別索引（方便排序/篩選用），
                   probabilities 存完整向量——原始機率不能只留 argmax 就丟掉，之後機率門檻策略要用
   'regression'  — 連續數值，predicted 是那個數值，probabilities 是 NULL
+  'dual'        — 雙頭模型（同一個模型同時輸出回歸值與事件機率，見 training/output_specs.py）：
+                  predicted = 回歸頭的預測值（單位＝Label 目標的單位，已還原目標縮放）；
+                  probabilities = [P(不符合事件規則), P(符合事件規則)]，順序固定，index 1 是「事件成立」。
+                  事件規則（op／threshold／單位）不逐列重複存，記在模型產物與 infer job 的
+                  `result[node].output_specs` 裡。
+
+`ts` 是樣本最後一根輸入棒的「識別時間」（棒起點）；`available_ts` 是這個樣本的資訊可用時間
+（日線 08:45 的棒要 13:45 收盤才完整，見 training/time_semantics.py），資料沒有 bar_end_ts 時是 NULL。
+兩者不可混用：決策時刻用 available_ts，對齊與切分用 ts。
 """
 
 import json
@@ -27,11 +36,18 @@ _STATEMENT_TIMEOUT_MS = 30000  # 分批寫入百萬列本身就需要一點時�
 CHUNK_SIZE = 5000
 
 
-def row_to_output(row: list[float], task_type: str, is_probability: bool) -> tuple[str, float, str | None]:
-    """把 predict()/predict_proba() 某一列的原始輸出，轉成要存進 DB 的 (output_type, predicted, probabilities_json)。
+def row_to_output(
+    row: list[float], task_type: str, is_probability: bool, output_kind: str | None = None,
+) -> tuple[str, float, str | None]:
+    """把 predict()/predict_proba()／predict_outputs 某一列的原始輸出，轉成要存進 DB 的
+    (output_type, predicted, probabilities_json)。
     這裡不做任何「只留摘要」的簡化——is_probability 時完整機率向量原封不動存進 probabilities，
     predicted 只是額外方便查詢用的 argmax，不是取代機率向量。
+    output_kind="dual"：row 是 [回歸值, 事件機率 p]，存成 predicted=回歸值、probabilities=[1-p, p]。
     """
+    if output_kind == "dual":
+        reg, p = float(row[0]), float(row[1])
+        return "dual", reg, json.dumps([1.0 - p, p])
     if is_probability:
         predicted_class = max(range(len(row)), key=lambda i: row[i])
         return "probability", float(predicted_class), json.dumps([float(x) for x in row])
@@ -57,23 +73,27 @@ class _PredictionWriter:
         with self._conn.cursor() as cur:
             cur.execute(f"SET statement_timeout = {_STATEMENT_TIMEOUT_MS}")
 
-    def write_chunk(self, timestamps: list[int], predictions: list[list[float]], task_type: str, is_probability: bool) -> None:
+    def write_chunk(
+        self, timestamps: list[int], predictions: list[list[float]], task_type: str, is_probability: bool,
+        output_kind: str | None = None, available_ts: list | None = None,
+    ) -> None:
         if not timestamps:
             return
         rows = []
-        for ts, pred in zip(timestamps, predictions):
-            output_type, predicted, probabilities = row_to_output(pred, task_type, is_probability)
-            rows.append((self.job_id, self.node_id, ts, output_type, predicted, probabilities))
+        for i, (ts, pred) in enumerate(zip(timestamps, predictions)):
+            output_type, predicted, probabilities = row_to_output(pred, task_type, is_probability, output_kind)
+            avail = available_ts[i] if available_ts is not None else None
+            rows.append((self.job_id, self.node_id, ts, avail, output_type, predicted, probabilities))
         with self._conn.cursor() as cur:
             execute_values(
                 cur,
                 """
                 INSERT INTO model_inference_predictions
-                    (job_id, node_id, ts, output_type, predicted, probabilities)
+                    (job_id, node_id, ts, available_ts, output_type, predicted, probabilities)
                 VALUES %s
                 """,
                 rows,
-                template="(%s, %s, to_timestamp(%s), %s, %s, %s)",
+                template="(%s, %s, to_timestamp(%s), to_timestamp(%s), %s, %s, %s)",
             )
         self.written += len(rows)
 
@@ -94,6 +114,7 @@ def open_prediction_writer(job_id: str, node_id: str) -> _PredictionWriter:
 def save_predictions_chunked(
     job_id: str, node_id: str, timestamps: list[int], predictions: list[list[float]],
     task_type: str = "classification", is_probability: bool = False,
+    output_kind: str | None = None, available_ts: list | None = None,
 ) -> int:
     """一次性版本（呼叫端已經有完整 timestamps/predictions 在手上時用）——內部一樣是
     分批寫入，只是「算預測」那一步不是這支的責任。串流情境（inference.py 的
@@ -107,6 +128,7 @@ def save_predictions_chunked(
         for i in range(0, len(timestamps), CHUNK_SIZE):
             writer.write_chunk(
                 timestamps[i:i + CHUNK_SIZE], predictions[i:i + CHUNK_SIZE], task_type, is_probability,
+                output_kind, available_ts[i:i + CHUNK_SIZE] if available_ts is not None else None,
             )
     finally:
         writer.close()
@@ -140,7 +162,7 @@ async def list_predictions(
         conditions.append(f"id > ${len(params)}")
     params.append(limit)
     query = f"""
-        SELECT id, ts, output_type, predicted, probabilities FROM model_inference_predictions
+        SELECT * FROM model_inference_predictions  -- SELECT *：available_ts 欄位遷移前讀舊資料也不會 500
         WHERE {' AND '.join(conditions)}
         ORDER BY id ASC LIMIT ${len(params)}
     """
@@ -151,7 +173,9 @@ async def list_predictions(
         await conn.close()
     return [
         {
-            "id": r["id"], "ts": int(r["ts"].timestamp()), "output_type": r["output_type"],
+            "id": r["id"], "ts": int(r["ts"].timestamp()),
+            "available_ts": int(r["available_ts"].timestamp()) if r.get("available_ts") is not None else None,
+            "output_type": r["output_type"],
             "predicted": r["predicted"],
             "probabilities": json.loads(r["probabilities"]) if r["probabilities"] else None,
         }
