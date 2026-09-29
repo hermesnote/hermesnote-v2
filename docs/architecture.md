@@ -87,7 +87,7 @@ frontend/
 ## 部署架構（2026-09-08 起，V2 已正式取代 V1 上線）
 
 - NAS（192.168.0.44）`/mnt/Hermesnote/web/hermes/` 底下，跟本機開發資料夾對稱：`frontend/`（build 產物）、`backend/`（含 `training/`）、`docker-compose.yml`、`nginx.conf`
-- 三個容器，統一用 `hermesnote-` 前綴、docker compose 管理：`hermesnote-frontend`（nginx:alpine，不掛 GPU）、`hermesnote-backend`（web API，不掛 GPU）、`hermesnote-training`（訓練 worker，掛 GPU，`deploy.resources.reservations.devices` 語法，`runtime: nvidia` 那種舊寫法在這台機器上測過是無效的）
+- 三個容器，統一用 `hermesnote-` 前綴、docker compose 管理：`hermesnote-frontend`（nginx:alpine，不掛 GPU）、`hermesnote-backend`（web API，不掛 GPU）、`hermesnote-training`（訓練 worker，掛 GPU，`deploy.resources.reservations.devices` 語法，`runtime: nvidia` 那種舊寫法在這台機器上測過是無效的）。worker 接任務前先釋放自身的模型引用與 CUDA 快取，再以 nvidia-smi 的實際可用顯存對照 `TRAINING_GPU_MIN_FREE_MB`（`backend/.env` 可設，預設 4096）判斷能否開始，不足就延後並在 log 記錄原因；每筆任務結束也會釋放快取
 - Nginx Proxy Manager：`hermesnote.com` → `192.168.0.44:8082`（frontend），Custom Location `/api` → `192.168.0.44:8000`（backend）；用的是主機 port 不是容器內部 bridge IP，容器砍掉重建不影響這個轉發規則
 - `deploy.ps1`（repo 根目錄）：本機一鍵部署，**只負責更新程式碼，不負責容器的建立/刪除**——部署前會先確認三個容器都存在且在跑，對不上就直接中止，不會嘗試建立新容器；`frontend` 服務因為沒有 build 步驟，光靠 bind mount 換檔案不會讓 nginx 重讀設定，所以每次都會額外 `docker compose restart frontend`
 - V1（`D:\hermesnote`）已完全停用封存，不再維護、不再參考程式碼，僅三階段流程與 data leakage 防範兩項設計原則列為參考

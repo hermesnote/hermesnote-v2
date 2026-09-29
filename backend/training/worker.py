@@ -3,7 +3,9 @@
 職責：
   - 輪詢 model_training_jobs（status='pending'），同一時間只執行一筆
     （GPU 記憶體通常被單一訓練跑滿，不支援多工，天生序列化）
-  - 執行前用 nvidia-smi 檢查 GPU 是否被其他 process（例如地端的 12B 模型）佔用，忙碌就延後重試
+  - 執行前先釋放自己不再用的 CUDA 快取，再用 nvidia-smi 看 GPU「實際可用顯存」是否達到預留量
+    （TRAINING_GPU_MIN_FREE_MB）；不足（通常是地端 12B 模型之類的外部程式佔用）就延後重試，
+    並記錄原因、總量／已用／可用、worker 自己仍持有的量與門檻
   - 真正執行 graph.py 的節點圖引擎（Feature Node / Label Node / Model Node），
     訓練過程中每個 epoch 透過 training/progress.py 寫進度回 DB + NOTIFY
 
@@ -18,8 +20,11 @@ graph_spec 格式：{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD", "nodes": [...]}
 """
 
 import asyncio
+import gc
 import json
+import os
 import subprocess
+import sys
 from datetime import date
 
 from training import job_store
@@ -31,26 +36,61 @@ from training.inference_store import open_prediction_writer
 from training.preview_store import save_preview_sample
 from training.progress import write_progress
 
-POLL_INTERVAL_SEC      = 5
-GPU_BUSY_RETRY_SEC     = 30
-GPU_BUSY_THRESHOLD_MB  = 2000
+POLL_INTERVAL_SEC   = 5
+GPU_BUSY_RETRY_SEC  = 30
+# 開始一筆任務前，GPU 至少要有這麼多「實際可用」顯存（MB）。可用量＝nvidia-smi 的 memory.free，
+# 已先釋放 worker 自己的 CUDA 快取，所以不會把自己保留的快取當成外部工作。
+GPU_MIN_FREE_MB     = int(os.getenv("TRAINING_GPU_MIN_FREE_MB", "4096"))
 
 
-def gpu_is_busy() -> bool:
-    """判斷 GPU 是否被其他 process（如地端 12B 模型）佔用。
-    查不到 nvidia-smi（環境本身沒有 GPU）時視為不忙碌，不擋訓練。
-    """
+def release_gpu_memory() -> None:
+    """釋放 worker 已不再使用的模型引用與 PyTorch 的 CUDA 快取（還給驅動，其他程式與下一筆任務可用）。
+    torch 還沒載入（worker 還沒跑過任何任務）時不做任何事，也不會為此初始化 CUDA。"""
+    gc.collect()
+    torch = sys.modules.get("torch")
+    if torch is not None and torch.cuda.is_available() and torch.cuda.is_initialized():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+
+
+def _own_cuda_mb() -> tuple[float, float]:
+    """worker 自己的 PyTorch 顯存：(allocated, reserved) MB；沒初始化 CUDA 時是 (0, 0)。
+    CUDA context 本身（數百 MB）不在這兩個數字裡，但會算在 nvidia-smi 的 used。"""
+    torch = sys.modules.get("torch")
+    if torch is None or not torch.cuda.is_available() or not torch.cuda.is_initialized():
+        return 0.0, 0.0
+    return torch.cuda.memory_allocated() / 2**20, torch.cuda.memory_reserved() / 2**20
+
+
+def query_gpu_memory() -> dict | None:
+    """nvidia-smi 讀第一張 GPU 的 total／used／free（MiB）；環境沒有 GPU 或查不到時回 None。"""
     try:
         out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+            ["nvidia-smi", "--query-gpu=memory.total,memory.used,memory.free", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5,
         )
         if out.returncode != 0 or not out.stdout.strip():
-            return False
-        used_mb = int(out.stdout.strip().splitlines()[0])
-        return used_mb > GPU_BUSY_THRESHOLD_MB
+            return None
+        total, used, free = (int(float(x)) for x in out.stdout.strip().splitlines()[0].split(","))
+        return {"total_mb": total, "used_mb": used, "free_mb": free}
     except Exception:
-        return False
+        return None
+
+
+def gpu_capacity() -> tuple[bool, str]:
+    """(可以開始任務嗎, 說明)。先釋放自己的快取，再用實際可用顯存對照預留量判斷。
+    查不到 GPU（沒有 nvidia-smi）時視為可以開始（CPU 環境不擋訓練）。"""
+    release_gpu_memory()
+    mem = query_gpu_memory()
+    if mem is None:
+        return True, "查不到 nvidia-smi，視為無 GPU 環境，不擋任務"
+    own_alloc, own_reserved = _own_cuda_mb()
+    detail = (f"total={mem['total_mb']}MiB used={mem['used_mb']}MiB free={mem['free_mb']}MiB "
+              f"worker自身 allocated={own_alloc:.0f}MiB reserved={own_reserved:.0f}MiB "
+              f"門檻 free>={GPU_MIN_FREE_MB}MiB（TRAINING_GPU_MIN_FREE_MB）")
+    if mem["free_mb"] >= GPU_MIN_FREE_MB:
+        return True, detail
+    return False, "GPU 可用顯存不足（已先釋放 worker 自身快取，剩餘佔用屬其他程式或 CUDA context）：" + detail
 
 
 async def _load_dataframes(graph_spec: dict) -> dict:
@@ -246,15 +286,16 @@ async def main_loop():
             await asyncio.sleep(POLL_INTERVAL_SEC)
             continue
 
-        if gpu_is_busy():
-            print(f"[worker] GPU busy, delaying job {job['id']}", flush=True)
+        ok, reason = gpu_capacity()
+        if not ok:
+            print(f"[worker] 延後任務 {job['id']}（{GPU_BUSY_RETRY_SEC} 秒後重試）：{reason}", flush=True)
             await asyncio.sleep(GPU_BUSY_RETRY_SEC)
             continue
 
         import torch
         device = "cuda" if torch.cuda.is_available() else "cpu"
         await job_store.mark_running(job["id"], device)
-        print(f"[worker] picked up job {job['id']} (job_type={job['job_type']})", flush=True)
+        print(f"[worker] picked up job {job['id']} (job_type={job['job_type']}) GPU：{reason}", flush=True)
         try:
             if job["job_type"] == "infer":
                 await run_one_infer(job["id"], job["graph_spec"])
@@ -263,6 +304,10 @@ async def main_loop():
         except Exception as e:
             print(f"[worker] job {job['id']} failed: {e}", flush=True)
             await job_store.mark_failed(job["id"], str(e))
+        finally:
+            # 任務結束（成功或失敗）後立刻釋放模型引用與 CUDA 快取，下一筆任務的顯存判斷才不會把
+            # 這筆留下的快取算成外部佔用
+            release_gpu_memory()
 
 
 if __name__ == "__main__":
