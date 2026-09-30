@@ -4,6 +4,7 @@ import HomePage from "./pages/HomePage";
 import QuantBacktestPage from "./pages/QuantBacktestPage";
 import ModelTrainingPage from "./pages/ModelTrainingPage";
 import HermesResumePage from "./pages/HermesResumePage";
+import Meeting20260930Page from "./pages/Meeting20260930Page";
 import LoginPage from "./pages/admin/LoginPage";
 import AdminLayout from "./pages/admin/AdminLayout";
 import AdminDashboard from "./pages/admin/AdminDashboard";
@@ -24,6 +25,7 @@ export default function App() {
             <Route path="/quant" element={<QuantBacktestPage />} />
             <Route path="/model" element={<ModelTrainingPage />} />
             <Route path="/hermes" element={<HermesResumePage />} />
+            <Route path="/20260930" element={<Meeting20260930Page />} />
           </Route>
 
           <Route path="/admin/login" element={<LoginPage />} />

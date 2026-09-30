@@ -1,6 +1,6 @@
 # 2026-09-30 通用指標視覺化
 
-> 狀態：程式、前後台共用元件、舊資料讀取轉換、Agent API 文件完成；**尚未部署**（待 Hermes 確認）。不需要 DB migration，不改寫正式資料。
+> 狀態：**已部署**（2026-09-30，`92b4a24`＋`39d5114`）；後台畫面需登入確認。不需要 DB migration，不改寫正式資料。
 > 決策：`decisions.md` D-036；規範：`spec.md` REQ-TR-09／REQ-TR-15／REQ-UI-05。
 
 ## 目標
@@ -59,4 +59,13 @@ GC 指出：前端非數值元件依固定 key（`per_class`／`class_distributi
 - 前端：`PerClassTable`／`DistributionBars`／`MatrixHeatmap` 改以 `metricKey` 參數讀資料，per_class 欄位由資料決定；`EvaluationView` 依 `definitions[key].shape` 分派（沒有定義時由資料推斷 shape）。
 - 驗證：新增 3 項測試——`evaluation.py` 產生的鍵都已登記；以新名稱指標（`regime_transition_matrix` 矩陣＋自訂軸、`regime_stay_ratio` 衍生、`per_regime`、`regime_counts`、`hit_rate`、新基準 `baseline_coin_flip`）只登記不改程式即進入評估清單、未登記鍵不納入；未知 shape 拒絕。後端 201 項通過、harness ALL MATCH、正式 3 筆 138 個數值仍逐一相同。畫面：同一批新名稱指標在評估區分別以熱圖（自訂軸名）、逐類別表（欄位 hit／n）、分布、數值比較（含新基準）呈現；正式雙頭紀錄呈現與修正前相同。
 - 文件：api.md（資料契約、依 shape 解析）、extending.md（shape 契約表、衍生指標、新基準）。
+
+## 部署紀錄（2026-09-30，Hermes 核准）
+
+1. 部署前唯讀確認：無 pending／running 任務；既有結果 日線 `193c8921`、15m `f6a3095c`、1m `5028249c`、5m `d2af34ef`（皆 Phase 1 雙頭 LSTM，done），另 2 筆 failed；資料全部保留。
+2. `deploy.ps1`（本機 HEAD `39d5114`）：同步 frontend／backend／`docs/agent-api`，重建 backend、training，重啟 frontend。
+3. 正式 API（backend 容器內）：`/registry/metrics` 200（18 個指標、4 種 shape）、`/registry/components/optimizer` 200；4 筆結果皆有 `metric_specs`（5 條序列）與 `evaluations`（每筆 4 筆紀錄），每筆 24 個數值與原 `evaluation` 相同，原欄位保留；backend log 無錯誤，worker 已啟動。
+4. 正式前台 `https://hermesnote.com/model?job=`：4 筆皆顯示 5 張曲線、比較條件（任務資料範圍 2011-01-03～2025-01-01、隨機切分 20%、樣本數與驗證集說明、best 挑選依據）、回歸頭 4 項／方向頭 5 項比較、逐類別表、2 張混淆矩陣熱圖；console 無錯誤。（直接連 `:8082` 沒有 `/api` 轉發，屬部署架構，須經 hermesnote.com。）
+5. HA 手冊：NAS `/mnt/Hermesnote/web/hermes/docs/agent-api/training/api.md`、`extending.md` 與本機雜湊一致。
+6. 未做：後台 `/admin/model` 需 Google 登入，由 Hermes 確認歷史紀錄的「展開完整評估」。
 
