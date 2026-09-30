@@ -10,6 +10,8 @@
   slots            可插拔位置：[{slot_name, component_registry, cardinality, accepts_output_kind?}]
                    （accepts_output_kind 只有「元件輸出會接進網路」的位置才宣告，例如 attention；optimizer 沒有）
   outputs／describe_outputs   具名輸出（見 training/output_specs.py）
+  metric_specs     `(node, label_node, task_type) -> dict`：這個設定會產生哪些逐輪序列與評估指標、屬於
+                   哪個輸出頭（引用 training/registry/metrics.py 登記的指標，見 metrics.build_specs）
   lazy_windows     訓練迴圈是否逐 batch 取樣（可用 graph.py 的 LazyWindowed 省記憶體）
 
 train 回傳 dict 至少含 final_metrics／predict／weights／model_config／evaluation；有 best／last
@@ -28,12 +30,14 @@ LOAD_REGISTRY: dict = {}
 ARCHITECTURE_OUTPUTS: dict = {}
 ARCHITECTURE_DESCRIBERS: dict = {}
 ARCHITECTURE_META: dict = {}
+ARCHITECTURE_METRICS: dict = {}
 LAZY_WINDOW_ARCHS: set = set()
 
 
 def register(key: str, *, family: str, label: str, params_schema: list, extra_checks=None,
              capabilities: dict | None = None, slots: list | None = None,
-             outputs: tuple = (DEFAULT_OUTPUT,), describe_outputs=None, lazy_windows: bool = False):
+             outputs: tuple = (DEFAULT_OUTPUT,), describe_outputs=None, metric_specs=None,
+             lazy_windows: bool = False):
     def deco(fn):
         ARCHITECTURE_REGISTRY[key] = fn
         ARCHITECTURE_OUTPUTS[key] = tuple(outputs)
@@ -43,6 +47,8 @@ def register(key: str, *, family: str, label: str, params_schema: list, extra_ch
         }
         if describe_outputs is not None:
             ARCHITECTURE_DESCRIBERS[key] = describe_outputs
+        if metric_specs is not None:
+            ARCHITECTURE_METRICS[key] = metric_specs
         if lazy_windows:
             LAZY_WINDOW_ARCHS.add(key)
         return fn
@@ -141,6 +147,13 @@ def describe_outputs(key: str, node: dict, label_node: dict, task_type: str) -> 
                                         "signed": target["signed"]})
     fn = ARCHITECTURE_DESCRIBERS.get(key, default_output_specs)
     return validate_output_specs(key, fn(node, label_node, task_type))
+
+
+def metric_specs(key: str, node: dict, label_node: dict, task_type: str) -> dict | None:
+    """這個模型節點的指標描述（逐輪序列、評估指標、輸出頭、引用指標的定義）；沒宣告的架構回 None。
+    只看提交的設定（node／label_node），已完成與進行中的任務、舊紀錄都能算。"""
+    fn = ARCHITECTURE_METRICS.get(key)
+    return fn(node, label_node, task_type) if fn else None
 
 
 def load_model(key: str, weights: bytes, model_config: dict) -> dict:

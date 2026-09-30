@@ -137,20 +137,24 @@ async def _load_dataframes(graph_spec: dict) -> dict:
 # 見 docs/temp/2026-09-10-three-party-design-alignment.md），只是不該用這種方式存；
 # 若之後真的需要逐列查詢，應該另外設計分批儲存/分頁查詢（比照 model_inference_predictions
 # 的做法），不是這輪要做的事。
-# evaluation：訓練後對整個驗證集算的完整分類／回歸評估報告（見 training/evaluation.py），
-# 大小是 O(類別數)，跟 prediction_source 那種 O(樣本數) 陣列不是同一個等級，可以放行。
-_SUMMARY_KEYS = {"final_metrics", "device", "training_meta", "output_specs", "evaluation"}
+# 評估：訓練回傳的完整評估報告（evaluation {best,last}，見 training/evaluation.py）轉成通用的
+# evaluations 清單（標明模型節點、輸出頭、資料集、評估時點與基準）＋metric_specs 後保存，
+# 大小是 O(類別數)；原始 evaluation 不再另存（見 training/evaluation_records.py）。
+_SUMMARY_KEYS = {"final_metrics", "device", "training_meta", "output_specs"}
 
 
-def _summarize(results: dict) -> dict:
+def _summarize(results: dict, graph_spec: dict, phase=None) -> dict:
     """results（run_graph 的完整回傳）→ 輕量摘要，給 job.result 用。"""
+    from training.evaluation_records import summarize_node
+
     return {
-        node_id: {k: v for k, v in r.items() if k in _SUMMARY_KEYS}
+        node_id: {**{k: v for k, v in r.items() if k in _SUMMARY_KEYS},
+                  **summarize_node(node_id, r, graph_spec, phase)}
         for node_id, r in results.items()
     }
 
 
-def run_one_sync(job_id: str, graph_spec: dict, dfs: dict) -> dict:
+def run_one_sync(job_id: str, graph_spec: dict, dfs: dict, phase=None) -> dict:
     def data_loader(timeframe: str):
         return dfs[timeframe]
 
@@ -178,16 +182,16 @@ def run_one_sync(job_id: str, graph_spec: dict, dfs: dict) -> dict:
     # 訓練成功當下就落地保存模型產物（見 training/artifacts.py 的說明：不能等使用者
     # 事後按「儲存」才存，那時候模型物件已經從記憶體消失了）。
     save_artifacts_for_job(job_id, graph_spec, results)
-    return _summarize(results)
+    return _summarize(results, graph_spec, phase)
 
 
-async def run_one(job_id: str, graph_spec: dict):
+async def run_one(job_id: str, graph_spec: dict, phase=None):
     # 讀資料（會打 quotes DB、很貴）之前先驗證圖：API 已經驗過一次，這裡再驗是為了涵蓋繞過 API
     # 直接寫進 model_training_jobs 的任務跟舊的 pending 列；失敗會由 main_loop 標記成 failed，
     # 訊息就是驗證回報的全部問題。
     validate_graph_spec(graph_spec)
     dfs = await _load_dataframes(graph_spec)
-    result = await asyncio.to_thread(run_one_sync, job_id, graph_spec, dfs)
+    result = await asyncio.to_thread(run_one_sync, job_id, graph_spec, dfs, phase)
     await job_store.mark_done(job_id, result)
     print(f"[worker] job {job_id} done: {result}", flush=True)
 
@@ -300,7 +304,7 @@ async def main_loop():
             if job["job_type"] == "infer":
                 await run_one_infer(job["id"], job["graph_spec"])
             else:
-                await run_one(job["id"], job["graph_spec"])
+                await run_one(job["id"], job["graph_spec"], job.get("phase"))
         except Exception as e:
             print(f"[worker] job {job['id']} failed: {e}", flush=True)
             await job_store.mark_failed(job["id"], str(e))

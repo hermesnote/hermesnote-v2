@@ -6,7 +6,7 @@
 
 ## 流程總覽（訓練）
 
-1. `GET /api/model/registry/{features,outcomes,labeling_rules,architectures}` 與 `GET /api/model/registry/components/{attention,optimizer}` → 查目前登記的可用選項、每個模型與元件的參數 schema（永遠用這幾支查即時清單，不要背下面範例裡的值）
+1. `GET /api/model/registry/{features,outcomes,labeling_rules,architectures,metrics}` 與 `GET /api/model/registry/components/{attention,optimizer}` → 查目前登記的可用選項、每個模型與元件的參數 schema（永遠用這幾支查即時清單，不要背下面範例裡的值）
 2. 組出 `graph_spec`（見下方「節點格式」），`POST /api/model/train` → 立刻回 `job_id`（訓練在 `hermesnote-training` 容器背景跑，不卡住這個請求）
 3. 輪詢 `GET /api/model/jobs/{job_id}` → 看 `status`，`done` 才有 `result`
 4. 訓練中想看即時進度：`GET /api/model/jobs/{job_id}/progress`（補歷史用）或直接開 WebSocket `GET /api/model/jobs/{job_id}/stream`（即時推）
@@ -351,57 +351,141 @@ GET /api/model/registry/components/optimizer
 
 ## 讀取訓練結果
 
-`GET /api/model/jobs/{id}` 的 `result[node_id]`（所有架構同一種形狀）：
+`GET /api/model/jobs/{id}`（與 `GET /api/model/jobs` 清單）回傳的訓練任務，每個模型節點都有兩份通用資料，**所有架構同一種形狀**：
+
+- `result[node_id].evaluations`：評估清單（完成後才有）
+- `result[node_id].metric_specs`，以及任務最上層的 `metric_specs[node_id]`（進行中也有，依提交設定算）：這個節點會產生哪些逐輪序列、哪些評估指標、每個指標的意義
 
 ```json
 {
-  "final_metrics": {
-    "val_joint_loss": 0.1456, "val_mse": 0.0003, "val_bce": 0.7266, "val_rmse": 0.0173, "val_mae": 0.0130, "val_dir_acc": 0.43,
-    "last": {"val_joint_loss": 0.1451, "val_mse": 0.0004, "val_bce": 0.7240, "val_rmse": 0.0200, "val_mae": 0.0167, "val_dir_acc": 0.43},
-    "monitor": "val_rmse", "monitor_mode": "min", "patience": 0, "min_delta": 0.0,
-    "best_epoch": 4, "stopped_epoch": 5, "epochs_run": 6, "stopped_early": false
+  "job_id": "…", "job_type": "train", "phase": 1, "status": "done",
+  "metric_specs": {"m1": { "...": "見下方 metric_specs" }},
+  "result": {"m1": {
+    "final_metrics": {"val_loss": 0.68, "val_accuracy": 0.56, "last": {"val_loss": 0.69, "val_accuracy": 0.54},
+                      "monitor": "val_loss", "monitor_mode": "min", "patience": 0, "min_delta": 0.0,
+                      "best_epoch": 41, "stopped_epoch": 299, "epochs_run": 300, "stopped_early": false},
+    "evaluations": [ { "...": "見下方 evaluations" } ],
+    "metric_specs": { "...": "同最上層 metric_specs[m1]" },
+    "output_specs": {"default": {"...": "..."}},
+    "training_meta": {"split_strategy": "random", "n_train": 2640, "n_val": 660, "n_excluded_boundary": 0,
+                      "n_samples": 3300, "val_ratio": 0.2, "split_seed": 42},
+    "device": "cuda"
+  }}
+}
+```
+
+- `final_metrics`：訓練迴圈裡的 best（監控指標最好那一輪，索引由 0 起算）驗證指標＋`last`＋訓練控制資訊（LSTM：`best_epoch`／`epochs_run`；XGBoost：`best_round`／`rounds_run`）。`patience=0` 時 `stopped_early` 一定是 `false`。
+- **best／last 兩組權重都保存**（`model_artifacts.weights`＝best、`weights_last`＝last），也都各自完整評估（`evaluations`）。
+- 產物的 `model_config`（推論時載入）記錄這次實際的設定：LSTM 有 `config`（解析後完整 params，含預設值與優化器）、`mode`、`n_classes`、`target_scaling`、`sequence_summary`、`attention_meta`、`output_specs`；XGBoost 有 `config`、`is_cls`、`n_classes`、`best_round`、`rounds_run`。
+
+### `evaluations`：評估清單
+
+每筆紀錄是「某個模型節點的某個輸出頭，在某個資料集、某個評估時點」的完整評估，比較條件寫在紀錄裡：
+
+```json
+{
+  "id": "m1/default/val/best",
+  "model_node": "m1", "head": "default", "head_label": "輸出", "task": "classification",
+  "dataset": {
+    "split": "val", "label": "驗證集", "selection": "random", "val_ratio": 0.2,
+    "n_samples": 660, "n_train": 2640, "n_total": 3300, "n_excluded_boundary": 0,
+    "phase": 1, "task_data_range": {"start": "2015-01-05", "end": "2024-12-31"},
+    "description": "任務資料範圍內的 3300 個樣本隨機打亂（固定種子 42），抽 20%（660 筆）為驗證集、其餘 2640 筆訓練；驗證樣本分散在整個期間，不是一段連續時間"
   },
-  "evaluation": {"best": { "...": "完整評估報告" }, "last": { "...": "同上，最後一輪權重" }},
-  "output_specs": {"default": {"...": "..."}, "regression": {"...": "..."}, "direction_probability": {"...": "..."}},
-  "device": "cuda",
-  "training_meta": {"n_train": 3000, "n_val": 700, "split_strategy": "random"}
+  "point": {"kind": "best", "round": 41, "round_unit": "epoch", "weights": "best", "label": "最佳（第 42 Epoch）",
+            "selected_by": {"monitor": "val_loss", "mode": "min", "patience": 0}},
+  "metrics": {
+    "accuracy": 0.5591, "balanced_accuracy": 0.5427, "macro_f1": 0.5404, "roc_auc": 0.5712, "average_precision": 0.5895,
+    "per_class": {"0": {"precision": 0.4979, "recall": 0.4069, "f1": 0.4478, "support": 290},
+                  "1": {"precision": 0.5934, "recall": 0.6784, "f1": 0.6331, "support": 370}},
+    "class_distribution": {"0": 290, "1": 370},
+    "confusion_matrix": {"labels": [0, 1], "values": [[118, 172], [119, 251]], "row_axis": "實際", "col_axis": "預測"}
+  },
+  "unavailable": {},
+  "baselines": [{"key": "majority_class", "label": "訓練集多數類別", "available": true,
+                 "method": "predict_majority_class_from_train",
+                 "metrics": {"accuracy": 0.5606, "balanced_accuracy": 0.5, "macro_f1": 0.3592}, "detail": {"class": 1}}]
 }
 ```
 
-- `final_metrics` 頂層＝**best**（監控指標最好那一輪，索引由 0 起算）的驗證集指標；`last`＝最後一輪的同一組指標。`patience=0` 時 `stopped_early` 一定是 `false`、`epochs_run`＝`epochs`。
-- 驗證集指標依模式：單頭分類 `val_loss`／`val_accuracy`；單頭回歸 `val_loss`（損失空間）／`val_rmse`／`val_mae`（原單位）；雙頭如上例（`val_mse`／`val_bce`／`val_joint_loss` 在損失空間，`val_rmse`／`val_mae` 原單位）。
-- XGBoost 的訓練控制欄位是 `best_round`／`rounds_run`／`stopped_early`／`monitor`（`val_logloss`／`val_mlogloss`／`val_rmse`）／`patience`；驗證指標：分類 `val_logloss`（或 `val_mlogloss`）＋`val_accuracy`、回歸 `val_rmse`＋`val_mae`；同樣有 `last`。
-- **best／last 兩組權重都保存**（`model_artifacts.weights`＝best、`weights_last`＝last），也都各自完整評估。XGBoost 的 best＝截到 best round 的樹、last＝全部的樹。
-- 產物的 `model_config`（`GET /api/model/artifacts` 查清單；推論時載入）記錄這次實際的設定：LSTM 有 `config`（解析後完整 params，含預設值）、`mode`（`cls`／`reg`／`dual`）、`n_classes`、`target_scaling`、`sequence_summary`（接法的人類可讀說明，例如「雙向：正反兩個方向各自最終 hidden state 串接，再與 Attention context 串接」）、`attention_meta`（`null` 或所用元件的登記資訊）、`output_specs`；XGBoost 有 `config`、`is_cls`、`n_classes`、`best_round`、`rounds_run`。
+| 欄位 | 說明 |
+|---|---|
+| `id` | `模型節點/輸出頭/資料集/評估時點`，同一任務內唯一 |
+| `head` | `default`（單頭）；雙頭拆成 `regression` 與 `direction` 兩筆 |
+| `dataset.split` | 目前只有 `val`（驗證集）；預留 `holdout`（Phase 3）、`train` |
+| `dataset.selection` | `random`（Phase 1：任務資料範圍內所有樣本以固定種子 42 打亂後抽 `val_ratio`，驗證樣本**分散在整個期間**，不是一段時間）或 `chronological`（Phase 2：依時間排序取最後 `val_ratio`，並排除標籤跨越驗證起點的訓練樣本 `n_excluded_boundary`） |
+| `dataset.task_data_range` | 這個任務 graph_spec 的 `start`／`end`（**任務資料範圍**，不是驗證集的時間範圍） |
+| `dataset.n_samples`／`n_train`／`n_total` | 驗證集樣本數／訓練樣本數／切分前樣本總數 |
+| `point.kind` | `best`／`last`；預留 `checkpoint`。`round` 由 0 起算，`label` 是顯示用（由 1 起算）；`weights` 對應 `/infer` 的 `use_weights` |
+| `point.selected_by` | best 的挑選依據（監控指標、方向、patience） |
+| `metrics` | 鍵＝指標登記表的 key；值的形狀依定義的 `shape`：`scalar` 數值、`per_class` 物件、`distribution` 物件、`matrix` 為 `{labels, values, row_axis, col_axis}`。`accuracy` 由混淆矩陣推算（對角線／總數） |
+| `unavailable` | 算不出的指標與原因（該指標在 `metrics` 裡是 `null`），例如驗證集缺類別時的多分類 ROC-AUC、多分類 AP |
+| `baselines` | 適用的簡單基準：分類 `majority_class`（訓練集多數類別）；回歸 `train_mean`（預測訓練集平均）、`zero`（預測零）。`available=false` 時附 `reason` |
 
-**完整評估報告（`evaluation.best`／`evaluation.last`）**：對**整個驗證集**算一次（不是逐批平均）。單頭分類＝分類報告；單頭回歸＝回歸報告；雙頭＝`{"direction": 分類報告, "regression": 回歸報告}`。
+回歸頭的 `metrics` 是 `{"mse", "rmse", "mae", "r2"}`（`mse` 在目標原單位²，`rmse`／`mae` 在目標原單位，單位見 `metric_specs.heads[].target_unit`）。**`average_precision`（AP）不是梯形積分的 PR-AUC。** 數值不會出現 NaN（JSONB 一律存 `null`）。
+
+### `metric_specs`：指標描述（模型引用的共用指標定義）
 
 ```json
 {
-  "class_distribution": {"0": 120, "1": 130}, "confusion_matrix": [[80, 40], [35, 95]],
-  "confusion_matrix_labels": [0, 1],
-  "per_class": {"0": {"precision": 0.70, "recall": 0.67, "f1": 0.68, "support": 120},
-                "1": {"precision": 0.70, "recall": 0.73, "f1": 0.72, "support": 130}},
-  "macro_f1": 0.70, "balanced_accuracy": 0.70,
-  "roc_auc": 0.74, "average_precision": 0.71,
-  "baseline_majority_class": {"method": "predict_majority_class_from_train", "class": 1,
-                              "accuracy": 0.565, "balanced_accuracy": 0.5, "macro_f1": 0.36}
+  "round_unit": "epoch",
+  "heads": [{"key": "default", "label": "輸出", "task": "classification"}],
+  "series": [
+    {"id": "loss", "metric": "cross_entropy", "head": "default", "train": "loss", "val": "val_loss"},
+    {"id": "accuracy", "metric": "accuracy", "head": "default", "train": "accuracy", "val": "val_accuracy"}
+  ],
+  "evaluation": {"default": ["accuracy", "balanced_accuracy", "macro_f1", "roc_auc", "average_precision",
+                             "per_class", "class_distribution", "confusion_matrix"]},
+  "definitions": {"cross_entropy": {"key": "cross_entropy", "label": "Cross-entropy", "shape": "scalar",
+                                    "direction": "min", "unit": "loss_space", "format": "decimal", "description": "…"}}
 }
 ```
 
-```json
-{
-  "mse": 0.00015, "rmse": 0.0123, "mae": 0.0091, "r2": 0.12,
-  "baseline_mean": {"method": "predict_train_mean", "mse": 0.00021, "rmse": 0.0145, "mae": 0.0105, "r2": 0.0},
-  "baseline_zero": {"method": "predict_zero", "mse": 0.00019, "rmse": 0.0138, "mae": 0.0099, "r2": 0.05}
-}
+- `round_unit`：`epoch`（LSTM）或 `boosting_round`（XGBoost）。
+- `series`：逐輪序列。`train`／`val` 是逐輪紀錄（`/progress`、WebSocket）裡的欄位名——固定四欄 `loss`／`accuracy`／`val_loss`／`val_accuracy` 在最上層，其他在 `metrics` 物件裡。`unit` 有值時覆寫定義的單位（例：LSTM 回歸的訓練 MSE 在損失空間）。
+- 同一個 `loss` 欄位在不同模型意義不同，一律看 `series[].metric`：LSTM 分類 `cross_entropy`、LSTM 回歸 `mse`（損失空間）、XGBoost 分類 `logloss`／`mlogloss`、XGBoost 回歸 `rmse`；雙頭 LSTM 的序列是 `joint_loss`（聯合）、`rmse`／`mse`（回歸頭）、`dir_acc`／`bce`（方向頭）。
+- `definitions`：引用指標的定義——`direction`（`min` 越低越好／`max` 越高越好）、`unit`（`loss_space`／`target`／`target_squared`／`ratio`／`count`）、`shape`、`format`（`percent`／`decimal`／`int`）。全部指標：`GET /api/model/registry/metrics`。
+
+### 從 `evaluation.best／last` 改讀 `evaluations`（HA 解析腳本更新）
+
+**2026-09-30 起新任務不再保存 `evaluation`，只有 `evaluations`。** 舊紀錄的 `evaluation` 原樣保留並照常回傳（資料庫未改寫），同時由 API 讀取時轉換出 `evaluations`；所以**一律改讀 `evaluations`**，新舊紀錄都適用。
+
+| 舊（`result[node].evaluation`） | 新（`result[node].evaluations[]`） |
+|---|---|
+| `evaluation.best`／`evaluation.last` | `point.kind == "best"`／`"last"` 的紀錄 |
+| 雙頭 `evaluation.best.direction`／`.regression` | `head == "direction"`／`"regression"` 的兩筆紀錄 |
+| 單頭報告本身 | `head == "default"` 的紀錄 |
+| `report.macro_f1` 等數值 | `record.metrics.macro_f1`（鍵名不變；多了 `accuracy`） |
+| `report.confusion_matrix` ＋ `confusion_matrix_labels` | `record.metrics.confusion_matrix.values` ＋ `.labels` |
+| `report.per_class`／`class_distribution` | `record.metrics.per_class`／`class_distribution` |
+| `report.roc_auc_unavailable_reason` 等 | `record.unavailable.roc_auc` |
+| `report.baseline_majority_class` | `record.baselines` 中 `key == "majority_class"`（數值在 `.metrics`，類別在 `.detail.class`） |
+| `report.baseline_mean`／`baseline_zero` | `record.baselines` 中 `key == "train_mean"`／`"zero"` |
+| `report.baseline_*_unavailable_reason` | 該基準 `available == false` 的 `reason` |
+| （沒有） | `dataset`（資料集、切分、樣本數、Phase、任務資料範圍）、`point.round`／`selected_by` |
+
+```python
+def pick(result_node, head="default", kind="best", split="val"):
+    for rec in result_node["evaluations"]:
+        if rec["head"] == head and rec["point"]["kind"] == kind and rec["dataset"]["split"] == split:
+            return rec
+    return None
+
+# 舊：r["evaluation"]["best"]["macro_f1"]
+rec = pick(r, "default", "best")
+macro_f1 = rec["metrics"]["macro_f1"]
+# 舊：r["evaluation"]["best"]["direction"]["roc_auc"]（雙頭）
+roc = pick(r, "direction", "best")["metrics"]["roc_auc"]
+# 舊：r["evaluation"]["last"]["regression"]["baseline_mean"]["rmse"]
+b = next(x for x in pick(r, "regression", "last")["baselines"] if x["key"] == "train_mean")
+baseline_rmse = b["metrics"]["rmse"]
+# 舊：r["evaluation"]["best"]["confusion_matrix"]
+cm = pick(r, "default", "best")["metrics"]["confusion_matrix"]["values"]
 ```
 
-- **`average_precision`（AP）不是梯形積分的 PR-AUC**，兩者不能互相引用成同一個量。
-- 基準：分類 `baseline_majority_class`（多數類別由訓練集決定）；回歸 `baseline_mean`（預測訓練集平均）與 `baseline_zero`（預測零報酬）。
-- 算不出來的指標一律 `null`＋同名 `*_unavailable_reason`（例如驗證集缺某類別時多分類 ROC-AUC、只有一種類別時 AUC／AP、多分類 AP 未實作、樣本數 ≤1 時 R²），不會回 NaN。儲存層也保證：任何非有限數值寫進 JSONB 前一律存成 `null`。
+### 逐輪指標
 
-每輪指標：`GET .../progress` 與 WebSocket 進度訊息是 `{node_id, epoch, loss, accuracy, val_loss, val_accuracy, metrics}`。`metrics` 是擴充指標：單頭回歸 `rmse`／`val_rmse`／`val_mae`；雙頭 `joint_loss`／`mse`／`bce`／`rmse`／`dir_acc` 與各自的 `val_` 版本（雙頭時 `loss` 欄＝聯合損失、`accuracy` 欄＝方向準確率）；單頭分類與 XGBoost 為 `null`。XGBoost 的「輪」是 boosting round。
+`GET .../progress` 與 WebSocket 進度訊息是 `{node_id, epoch, loss, accuracy, val_loss, val_accuracy, metrics}`；要畫哪些序列、各欄位意義看 `metric_specs.series`。`metrics` 是擴充指標：單頭回歸 `rmse`／`val_rmse`／`val_mae`；雙頭 `joint_loss`／`mse`／`bce`／`rmse`／`dir_acc` 與各自的 `val_` 版本；單頭分類與 XGBoost 為 `null`。
 
 **推論（雙頭）**：`/inference_predictions` 逐列 `output_type="dual"`，`predicted` 是回歸值（目標原單位）、`probabilities`＝`[P(不符合事件), P(符合事件)]`。
 
@@ -421,8 +505,10 @@ GET /api/model/registry/components/optimizer
 ```json
 {
   "job_id": "...", "graph_spec": { ... }, "status": "done", "error": null,
-  "result": { "model1": { "final_metrics": {...}, "device": "cuda", "training_meta": {"n_train": 8000, "n_val": 2000, "split_strategy": "random"} } },
-  "device": "cuda", "job_type": "train", "phase": null, "parent_job_id": null, "created_at": "..."
+  "metric_specs": { "model1": {...} },
+  "result": { "model1": { "final_metrics": {...}, "evaluations": [...], "metric_specs": {...}, "output_specs": {...},
+                          "device": "cuda", "training_meta": {...} } },
+  "device": "cuda", "job_type": "train", "phase": 1, "parent_job_id": null, "created_at": "..."
 }
 ```
 

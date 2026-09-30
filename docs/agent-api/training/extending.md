@@ -6,7 +6,7 @@
 ## 框架怎麼運作
 
 ```
-register(key, family, label, params_schema, extra_checks, capabilities, slots, outputs, describe_outputs, lazy_windows)
+register(key, family, label, params_schema, extra_checks, capabilities, slots, outputs, describe_outputs, metric_specs, lazy_windows)
         │
         ├─ GET /api/model/registry/architectures ── list_available()：key／capabilities／slots／params_schema／outputs
         ├─ GET /api/model/registry/components/{registry} ── 元件（attention、optimizer…）的 params_schema／slot_compatibility
@@ -48,7 +48,8 @@ PARAMS_SCHEMA = [
 @register("transformer", family="transformer", label="Transformer", params_schema=PARAMS_SCHEMA,
           capabilities={"bidirectional": "fixed_off", "attention": "fixed_on", "dual_head": "fixed_off",
                         "optimizer": "configurable"},
-          slots=[{"slot_name": "optimizer", "component_registry": "optimizer", "cardinality": "exactly_one"}])
+          slots=[{"slot_name": "optimizer", "component_registry": "optimizer", "cardinality": "exactly_one"}],
+          metric_specs=metric_specs)   # 見下方「宣告指標」
 def train_transformer(X_train, y_train, X_val, y_val, cfg, on_epoch, task_type="classification", *,
                       preview_hook=None, n_classes=None) -> dict:
     ...
@@ -78,6 +79,23 @@ def load_transformer(weights: bytes, model_config: dict) -> dict:
 - 每輪呼叫 `on_epoch(epoch, {"loss", "accuracy", "val_loss", "val_accuracy", ...擴充指標})`；擴充指標會自動存進進度的 `metrics` 欄。
 - 多個具名輸出：`register(..., outputs=(DEFAULT_OUTPUT, "regression", ...), describe_outputs=fn)`，`fn(node, label_node, task_type)` 依這次設定回傳 `output_specs`（參考 `lstm.describe`）。
 - `lazy_windows=True`：訓練迴圈逐 batch 取樣時，graph.py 會傳入省記憶體的 LazyWindowed（參考 LSTM）。
+
+**宣告指標（`metric_specs`）**：前台與 Agent 依它呈現逐輪曲線與評估結果，新架構必須宣告：
+
+```python
+from training.registry import metrics as M
+
+def metric_specs(node, label_node, task_type):
+    return M.build_specs(
+        round_unit="epoch",
+        heads=[{"key": "default", "label": "輸出", "task": task_type}],
+        series=[{"id": "loss", "metric": "cross_entropy", "head": "default", "train": "loss", "val": "val_loss"}],
+        evaluation={"default": M.CLASSIFICATION_EVAL if task_type == "classification" else M.REGRESSION_EVAL})
+```
+
+- `series[].train`／`val` 必須是 `on_epoch` 真的回報的欄位名（測試會實際訓練一次核對，見 `tests/test_evaluation_records.py`）。
+- 引用的指標必須已在 `training/registry/metrics.py` 登記；沒有的先登記（見「新增指標」）。
+- 評估報告沿用 `training/evaluation.py` 的分類／回歸報告，worker 會轉成 `evaluations`；前端不用改。
 
 **必寫的測試**（參考 `tests/test_lstm.py`、`tests/test_xgboost.py`、`tests/test_model_framework.py`）：schema 驗證（必填、範圍、不適用欄位）、訓練後 best／last 與 evaluation 都在、`weights`／`weights_last` 重載後推論與訓練當下一致、`patience=0` 跑滿、`model_config` 可 JSON 化、經 `run_graph` 能被下游引用。
 
@@ -131,6 +149,18 @@ class AdamW:
 - 參數、預設值、合法範圍只寫在 `params_schema`；後端驗證、補預設值、UI 欄位都讀它。
 - `slot_compatibility` 決定哪些模型可以用；模型程式、API、前端都不用改。
 - 測試參考 `tests/test_optimizers.py`：預設與自訂參數確實傳進 `torch.optim`（檢查 `param_groups`）、產物保存完整設定、不相容組合被拒。
+
+## 新增指標
+
+在 `training/registry/metrics.py` 登記一行，再由模型的 `metric_specs` 引用：
+
+```python
+register("sharpe", label="Sharpe ratio", direction="max", unit="ratio", fmt="decimal", description="…")
+```
+
+- `shape` 決定前端元件：`scalar`（逐輪曲線、數值比較）、`per_class`（逐類別表）、`distribution`（分布）、`matrix`（熱圖，值為 `{labels, values, row_axis, col_axis}`）。
+- 逐輪指標：在模型 `on_epoch` 回報對應欄位（例如 `sharpe`／`val_sharpe`）並加進 `series`；評估指標：在評估報告產生對應鍵並加進 `evaluation[head]`。
+- 前端（`frontend/src/components/metrics/`）依 `shape`／`direction`／`unit`／`format` 呈現，不需要改頁面。
 
 ## 新增一種可插拔位置（新的元件登記表）
 

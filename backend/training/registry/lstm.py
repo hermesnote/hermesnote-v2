@@ -114,6 +114,43 @@ def _extra_checks(cfg: dict, context: dict) -> list:
     return problems
 
 
+def metric_specs(node: dict, label_node: dict, task_type: str) -> dict:
+    """逐輪序列鍵對應 train_lstm 的 on_epoch；評估指標對應 _full_evaluation。"""
+    from training.output_specs import label_metadata
+    from training.registry import metrics as M
+
+    params = node.get("params") or {}
+    unit = label_metadata(label_node, task_type)["unit"]
+    if params.get("heads") == "dual":
+        heads = [{"key": "regression", "label": "回歸頭", "task": "regression", "target_unit": unit},
+                 {"key": "direction", "label": "方向頭", "task": "classification"},
+                 {"key": "joint", "label": "聯合", "task": "joint"}]
+        series = [
+            {"id": "joint_loss", "metric": "joint_loss", "head": "joint", "train": "joint_loss", "val": "val_joint_loss"},
+            {"id": "rmse", "metric": "rmse", "head": "regression", "train": "rmse", "val": "val_rmse"},
+            {"id": "mse", "metric": "mse", "head": "regression", "train": "mse", "val": "val_mse", "unit": "loss_space"},
+            {"id": "dir_acc", "metric": "dir_acc", "head": "direction", "train": "dir_acc", "val": "val_dir_acc"},
+            {"id": "bce", "metric": "bce", "head": "direction", "train": "bce", "val": "val_bce"},
+        ]
+        evaluation = {"regression": M.REGRESSION_EVAL, "direction": M.CLASSIFICATION_EVAL}
+    elif task_type == "classification":
+        heads = [{"key": "default", "label": "輸出", "task": "classification"}]
+        series = [
+            {"id": "loss", "metric": "cross_entropy", "head": "default", "train": "loss", "val": "val_loss"},
+            {"id": "accuracy", "metric": "accuracy", "head": "default", "train": "accuracy", "val": "val_accuracy"},
+        ]
+        evaluation = {"default": M.CLASSIFICATION_EVAL}
+    else:
+        heads = [{"key": "default", "label": "輸出", "task": "regression", "target_unit": unit}]
+        series = [
+            {"id": "loss", "metric": "mse", "head": "default", "train": "loss", "val": "val_loss", "unit": "loss_space"},
+            {"id": "rmse", "metric": "rmse", "head": "default", "train": "rmse", "val": "val_rmse"},
+            {"id": "mae", "metric": "mae", "head": "default", "val": "val_mae"},
+        ]
+        evaluation = {"default": M.REGRESSION_EVAL}
+    return M.build_specs(round_unit="epoch", heads=heads, series=series, evaluation=evaluation)
+
+
 def describe(node: dict, label_node: dict, task_type: str) -> dict:
     params = node.get("params") or {}
     if params.get("heads") != "dual":
@@ -283,6 +320,7 @@ def _full_evaluation(mode: str, preds: dict, X_val, targets: dict, train_targets
                   "accepts_output_kind": ["context_vector"]},
                  {"slot_name": "optimizer", "component_registry": "optimizer", "cardinality": "exactly_one"}],
           outputs=(DEFAULT_OUTPUT, "regression", "direction_probability"), describe_outputs=describe,
+          metric_specs=metric_specs,
           lazy_windows=True)
 def train_lstm(X_train, y_train, X_val, y_val, cfg: dict, on_epoch, task_type: str = "classification", *,
                preview_hook=None, n_classes: int | None = None) -> dict:

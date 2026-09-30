@@ -19,7 +19,8 @@ import "./ModelSettings.css";
 import "./TreeBuilder.css";
 import { IndicatorAdder, findIndicator, type RegistryGroup } from "./TreeBuilder";
 import SchemaForm from "./SchemaForm";
-import { evaluationRows, type EvaluationPair, type EvaluationReport } from "../../evaluationRows";
+import { EvaluationView } from "../../../components/metrics/MetricsDashboard";
+import type { EvaluationRecord, MetricSpecs } from "../../../components/metrics/metricsModel";
 import {
   buildParams, reconcileEnums, withInitialValues, withRequiredComponents,
   type Component, type FormContext, type FormValues,
@@ -106,7 +107,9 @@ type JobSummary = {
     // 頂層是最佳（best）那一輪的指標與訓練控制資訊；`last` 是最後一輪的同一組指標（巢狀物件）。
     final_metrics?: Record<string, number | string | boolean | Record<string, number>>;
     /** 完整分類／回歸評估報告，best／last 各一份（所有架構都有）。 */
-    evaluation?: EvaluationPair | null;
+    /** 評估清單（best／last…，標明輸出頭、資料集、評估時點與基準；舊紀錄由後端讀取時轉換）與指標描述 */
+    evaluations?: EvaluationRecord[];
+    metric_specs?: MetricSpecs | null;
     /** infer job 的摘要：全期間逐列結果分批存進 model_inference_predictions，這裡只留筆數與時間範圍 */
     count?: number;
     start_ts?: number | null;
@@ -177,26 +180,15 @@ function ModuleCardNode({ data }: NodeProps) {
 
 const nodeTypes = { moduleCard: ModuleCardNode };
 
-// 完整評估報告的展開／收合摘要：預設收合，點開才畫；best／last 各一份（所有架構都有）。
-function EvaluationSummary({ evaluation }: { evaluation: EvaluationPair }) {
+// 完整評估的展開／收合摘要：預設收合；展開後用前後台共用的 EvaluationView（精簡模式）呈現。
+function EvaluationSummary({ evaluations, specs }: { evaluations: EvaluationRecord[]; specs?: MetricSpecs | null }) {
   const [open, setOpen] = useState(false);
-  const Block = ({ label, ev }: { label: string; ev: EvaluationReport }) => (
-    <div className="model-settings-eval-block">
-      <div className="model-settings-hint">{label}</div>
-      {evaluationRows(ev).map(([k, v]) => <div className="model-settings-hint" key={k}>{k}：{v}</div>)}
-    </div>
-  );
   return (
-    <div className="model-settings-history-stat">
-      <button type="button" className="model-settings-add-btn" onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}>
-        {open ? "收起" : "展開"}完整評估報告
+    <div className="model-settings-history-stat" style={{ flexBasis: "100%" }} onClick={(e) => e.stopPropagation()}>
+      <button type="button" className="model-settings-add-btn" onClick={() => setOpen((v) => !v)}>
+        {open ? "收起" : "展開"}完整評估（{evaluations.length} 筆）
       </button>
-      {open && (
-        <div onClick={(e) => e.stopPropagation()}>
-          <Block label="最佳權重（best）" ev={evaluation.best} />
-          <Block label="最後一輪權重（last）" ev={evaluation.last} />
-        </div>
-      )}
+      {open && <EvaluationView specs={specs} evaluations={evaluations} compact />}
     </div>
   );
 }
@@ -707,7 +699,7 @@ export default function ModelSettings() {
                           </div>
                         );
                       })}
-                      {r.evaluation && <EvaluationSummary evaluation={r.evaluation} />}
+                      {!!r.evaluations?.length && <EvaluationSummary evaluations={r.evaluations} specs={r.metric_specs} />}
                       {artifact && (
                         <>
                           <button

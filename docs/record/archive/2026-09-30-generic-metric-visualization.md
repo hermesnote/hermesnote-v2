@@ -1,0 +1,52 @@
+# 2026-09-30 通用指標視覺化
+
+> 狀態：程式、前後台共用元件、舊資料讀取轉換、Agent API 文件完成；**尚未部署**（待 Hermes 確認）。不需要 DB migration，不改寫正式資料。
+> 決策：`decisions.md` D-036；規範：`spec.md` REQ-TR-09／REQ-TR-15／REQ-UI-05。
+
+## 目標
+
+模型／評估流程產生的資料，前台依資料描述用對應元件呈現：逐輪序列畫曲線、評估結果用數值比較與表格、矩陣用熱圖；評估組織可容納 best、last、未來的 checkpoint、不同資料集；標明模型、輸出頭、資料集與評估時點，適用的基準一起呈現；新指標透過資料描述接入。
+
+## 實作
+
+**後端**
+- `training/registry/metrics.py`（新）：指標定義登記表（label、shape、direction、unit、format、description）、`build_specs()`、`GET /api/model/registry/metrics`。
+- `architectures.register(..., metric_specs=)`：LSTM（單頭分類、單頭回歸、雙頭）與 XGBoost（二元、多元、回歸）宣告逐輪序列（對應訓練迴圈實際欄位與指標意義，例如同一個 `loss` 在 LSTM 分類是 cross_entropy、XGBoost 分類是 logloss）與評估指標、輸出頭、目標單位。
+- `training/evaluation_records.py`（新）：`build_evaluations()` 把評估報告轉成 `evaluations` 清單（id、model_node、head、dataset、point、metrics、unavailable、baselines），只重組不重算，accuracy 由混淆矩陣推算；`summarize_node()` 供 worker 保存新任務；`enrich_job()` 供 API 讀取時補 `metric_specs`（進行中也有）並轉換舊紀錄。
+- `dataset` 標明：任務資料範圍（graph_spec 的 start／end）、切分方式、驗證比例、樣本數、Phase，以及驗證集怎麼來的說明——random：固定種子 42 打亂、驗證樣本分散在整個期間；chronological：時間最後一段、邊界排除筆數。
+- `training_meta` 新增 `n_samples`、`val_ratio`、`split_seed`（新任務）。
+- worker：新任務只保存 `evaluations`＋`metric_specs`（不再另存 `evaluation`）；`fetch_next_pending` 帶出 `phase`。
+- API：`GET /api/model/jobs`、`/jobs/{id}` 經 `enrich_job`；舊紀錄 `evaluation` 原樣保留並回傳。
+
+**前端**（`frontend/src/components/metrics/`，前台 `/model` 與後台歷史紀錄共用）
+- `MetricsDashboard`：依 `metric_specs.series` 每個序列一張 `MetricSeriesChart`（train／val、best 標記、同輸出頭同單位的基準參考線），逐輪明細表欄位也由描述產生。
+- `EvaluationView`：輸出頭／資料集分頁、評估時點勾選；比較條件（資料集、任務資料範圍、切分方式、樣本數、驗證集說明、best 挑選依據、目標單位）；`MetricCompare`（best／last／基準並排、依 direction 標較佳者、相對條、無法計算附原因）、`PerClassTable`、`DistributionBars`、`MatrixHeatmap`（依列比例上色）。後台用精簡模式。
+- 移除：`DUAL_METRICS`、依架構名稱猜 loss 種類、`FinalModelPanel`、`EvaluationPanel`、`pages/evaluationRows.ts`、固定的 Loss／Accuracy 兩張圖與其同步邏輯。
+
+**文件**：`docs/agent-api/training/api.md`（讀取訓練結果改寫：`evaluations`、`metric_specs` 格式、HA 從 `evaluation.best／last` 改讀的對照表與範例）、`extending.md`（宣告指標、新增指標）、`spec.md`、`architecture.md`、`decisions.md`（D-036）。
+
+## 驗證
+
+- 後端 198 項測試通過（3 skipped）；contract harness ALL MATCH。新增 `tests/test_evaluation_records.py`（11 項）：7 種模式實際訓練後，宣告的逐輪欄位都真的有回報；轉換後數值與原報告逐一相同；紀錄身分（輸出頭、評估時點輪次、挑選依據、Phase、任務資料範圍）；random／chronological 的驗證集說明；舊欄位保留、轉換可重複；進行中任務也有 `metric_specs`；推論任務不受影響；新任務只存新格式；新舊共用同一個轉換函式。
+- **正式資料（唯讀）**：3 筆已完成的雙頭 LSTM（Phase 1）讀取轉換後，138 個數值與原始 `evaluation` 逐一相同，原欄位未改動。
+- **實際畫面**（Browser pane 暫時 harness，掛真正的 `ModelTrainingPage`／`ModelSettings`；資料用正式 3 筆＋合成新格式 3 類 LSTM、XGBoost Phase 2 回歸；不打本機 API；驗證後已移除）：雙頭的聯合損失／RMSE／MSE／方向準確率／BCE 五張曲線、best 標記、RMSE 基準參考線；評估的比較條件、best／last／基準比較、逐類別表、類別分布、兩張混淆矩陣熱圖；XGBoost 顯示 Boosting 輪次與時間切分說明；3 類的熱圖與「無法計算」原因；後台歷史紀錄精簡模式。瀏覽器 console 無錯誤。
+- 前端 `tsc -b`、`npm run build` 通過；api.md 範例 payload 經後端驗證；HA 改讀範例在正式資料轉換結果上實跑通過。
+
+## 限制
+
+- 評估只有驗證集的 best／last；Phase 3 holdout 評估、中間 checkpoint、訓練集評估列為後續需求（格式已預留）。
+- 舊紀錄沒有 `n_samples`／`split_seed`，由 `n_train＋n_val＋邊界排除` 推算總數、種子依程式固定值 42 說明。
+- 基準參考線只畫在單位一致的曲線上（損失空間的曲線不畫原單位基準）。
+- 同一任務多個模型節點時，頁面沿用既有的節點選單逐一顯示。
+
+## 部署步驟（待確認，未執行）
+
+1. 不需要 DB migration，也不清理資料；部署前確認沒有 pending／running 任務（worker 重建會中斷執行中任務）。
+2. 本機 `npm run build`（frontend）→ `deploy.ps1`：同步 `frontend/dist`、`backend`、`docs/agent-api`，重建 backend、training，重啟 frontend。
+3. HA 文件：`docs/agent-api/training/api.md`、`extending.md`、`index.md` 隨部署同步到 NAS `/mnt/Hermesnote/web/hermes/docs/agent-api`；HA 依 api.md「從 `evaluation.best／last` 改讀 `evaluations`」更新解析腳本（舊紀錄的 `evaluation` 仍會回傳，但新任務不再有）。
+4. 部署後確認：`GET /api/model/registry/metrics` 200；正式 3 筆紀錄的 `/api/model/jobs/{id}` 回傳 `evaluations`（每筆 4 筆紀錄）與 `metric_specs`；`/model?job=` 與後台歷史紀錄畫面正常。
+
+## 提交
+
+Hermes 核准本輪與相關文件一起提交：後端（`registry/metrics.py`、`evaluation_records.py`、architectures／lstm／xgboost_model 的 `metric_specs`、worker、job_store、graph 的 `training_meta`、router）、前端（`components/metrics/`、`ModelTrainingPage.tsx`、`ModelSettings.tsx`，刪除 `pages/evaluationRows.ts`）、測試、`docs/agent-api/training/`、`docs/spec.md`／`architecture.md`／`decisions.md`（2026-09-29 整理的三份，含本輪 D-036 等更新）、`docs/index.md`（只提交三份文件的索引列與閱讀順序；他人新增的 agent-workflow／HA 手冊列未納入）、`docs/record/`。部署待目前 5 分 K 訓練完成、確認無 pending／running 任務後再安排，HA 解析更新同步銜接。
+

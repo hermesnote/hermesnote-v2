@@ -64,7 +64,7 @@ async def fetch_next_pending() -> dict | None:
     try:
         row = await conn.fetchrow(
             """
-            SELECT id, graph_spec, job_type FROM model_training_jobs
+            SELECT id, graph_spec, job_type, phase FROM model_training_jobs
             WHERE status = 'pending'
             ORDER BY created_at ASC
             LIMIT 1
@@ -74,7 +74,8 @@ async def fetch_next_pending() -> dict | None:
         await conn.close()
     if row is None:
         return None
-    return {"id": str(row["id"]), "graph_spec": json.loads(row["graph_spec"]), "job_type": row["job_type"]}
+    return {"id": str(row["id"]), "graph_spec": json.loads(row["graph_spec"]), "job_type": row["job_type"],
+            "phase": row["phase"]}
 
 
 async def mark_running(job_id: str, device: str) -> None:

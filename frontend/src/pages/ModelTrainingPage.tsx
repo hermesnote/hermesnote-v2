@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { evaluationRows, type EvaluationPair, type EvaluationReport } from "./evaluationRows";
+import MetricsDashboard from "../components/metrics/MetricsDashboard";
+import { ROUND_NOUN, type EvaluationRecord, type MetricSpecs } from "../components/metrics/metricsModel";
 import { useSearchParams } from "react-router-dom";
 import {
   createChart,
   CandlestickSeries,
-  LineSeries,
   createSeriesMarkers,
   type ISeriesApi,
   type ISeriesMarkersPluginApi,
@@ -52,8 +52,9 @@ type JobResultEntry = {
   // 頂層是最佳（best）那一輪的驗證指標＋訓練控制摘要（monitor／patience／best_epoch 或 best_round／
   // stopped_early…）；`last` 是最後一輪的同一組指標（巢狀物件），跟頂層分開列
   final_metrics?: Record<string, number | string | boolean | Record<string, number>>;
-  // 完整分類／回歸評估報告，best／last 各一份（所有架構都有）
-  evaluation?: EvaluationPair | null;
+  // 評估清單（每筆標明模型節點、輸出頭、資料集、評估時點、基準；舊紀錄由後端讀取時轉換）與指標描述
+  evaluations?: EvaluationRecord[];
+  metric_specs?: MetricSpecs | null;
   output_specs?: Record<string, OutputSpec>;
   output_type?: string; // infer job 才有，雙頭模型是 "dual"
   device?: string;
@@ -80,6 +81,8 @@ type JobDetail = {
   result: Record<string, JobResultEntry> | null;
   device: string | null;
   created_at?: string;
+  // 每個模型節點的指標描述（進行中也有，後端依提交設定算），前台依此決定畫哪些曲線
+  metric_specs?: Record<string, MetricSpecs | null>;
 };
 
 // 最終模型推論的逐列結果（job_type='infer'）——跟 WindowPreview（訓練途中的抽樣展示）
@@ -136,80 +139,6 @@ type ProgressPoint = {
 function extractNodeId(raw: { node_id?: string; window_meta?: unknown }): string {
   const wm = raw.window_meta as { node_id?: string } | null | undefined;
   return raw.node_id ?? wm?.node_id ?? "default";
-}
-
-function fmt(n: number | null | undefined, digits = 4): string {
-  return n === null || n === undefined ? "—" : n.toFixed(digits);
-}
-
-// 雙頭 LSTM（heads="dual"）每輪的擴充指標（後端 training/registry/lstm.py，各自有明確名稱）：
-// [key, 顯示名稱, 是否百分比]。mse／bce／joint_loss 在「損失空間」（啟用目標縮放時是縮放後的尺度），
-// rmse 一律是目標原單位。
-const DUAL_METRICS: [string, string, boolean][] = [
-  ["joint_loss", "聯合損失", false], ["mse", "MSE（損失空間）", false], ["bce", "BCE", false],
-  ["rmse", "RMSE（原單位）", false], ["dir_acc", "方向準確率", true],
-];
-function fmtDual(v: number | null | undefined, pct: boolean): string {
-  if (v === null || v === undefined || Number.isNaN(v)) return "—";
-  return pct ? `${(v * 100).toFixed(2)}%` : Math.abs(v) < 0.001 && v !== 0 ? v.toExponential(3) : v.toFixed(5);
-}
-
-// 完整驗證集評估報告，best／last 各一份（所有架構都有）；預設收合，展開才畫混淆矩陣這類細節。
-function EvaluationPanel({ evaluation }: { evaluation: EvaluationPair }) {
-  const [open, setOpen] = useState(false);
-  const Block = ({ label, ev }: { label: string; ev: EvaluationReport }) => (
-    <div className="model-dual-metrics-block">
-      <div className="model-dual-metrics-title">{label}</div>
-      {evaluationRows(ev).map(([k, v]) => (
-        <div className="model-preview-info-row" key={k}><span>{k}</span><strong>{v}</strong></div>
-      ))}
-    </div>
-  );
-  return (
-    <>
-      <button type="button" className="model-epoch-toggle" onClick={() => setOpen((v) => !v)}>
-        {open ? "收起" : "展開"}完整評估報告
-      </button>
-      {open && (
-        <div className="model-dual-metrics">
-          <Block label="最佳權重（best）" ev={evaluation.best} />
-          <Block label="最後一輪權重（last）" ev={evaluation.last} />
-        </div>
-      )}
-    </>
-  );
-}
-
-// 訓練結束後的 best／last 摘要（所有架構）：訓練控制＋監控指標在最佳輪與最後一輪各自的值。
-// LSTM 用 epoch（best_epoch／epochs_run），XGBoost 用 boosting round（best_round／rounds_run）。
-function FinalModelPanel({ fm, roundNoun }: { fm: NonNullable<JobResultEntry["final_metrics"]>; roundNoun: string }) {
-  const bestIdx = fm.best_epoch ?? fm.best_round;
-  const runs = fm.epochs_run ?? fm.rounds_run;
-  const patience = Number(fm.patience ?? 0);
-  const last = (fm.last && typeof fm.last === "object" ? fm.last : {}) as Record<string, number>;
-  const valKeys = Object.keys(fm).filter((k) => k.startsWith("val_") && typeof fm[k] === "number");
-  return (
-    <div className="model-dual-metrics-block">
-      <div className="model-dual-metrics-title">
-        最終模型（best＝最佳輪權重，last＝最後一輪權重）｜
-        {patience === 0 ? "early stopping 關閉（patience=0），跑滿設定輪數" : `early stopping patience=${patience}`}
-      </div>
-      <div className="model-preview-info-row"><span>最佳{roundNoun}／實際跑了</span><strong>
-        第 {Number(bestIdx) + 1}／共 {String(runs)} {fm.stopped_early ? "（early stopping 觸發）" : "（跑滿）"}
-      </strong></div>
-      <div className="model-preview-info-row"><span>監控指標</span><strong>{String(fm.monitor ?? "—")}</strong></div>
-      {valKeys.map((k) => (
-        <div className="model-preview-info-row" key={k}>
-          <span>{k}（best／last）</span>
-          <strong>{fmtDual(fm[k] as number, k.endsWith("accuracy") || k.endsWith("dir_acc"))}／{fmtDual(last[k], k.endsWith("accuracy") || k.endsWith("dir_acc"))}</strong>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function fmtPct(n: number | null | undefined, digits = 2): string {
-  return n === null || n === undefined ? "—" : `${(n * 100).toFixed(digits)}%`;
 }
 
 // 隨機訓練時樣本是打亂的，同一個節點抽到的 window 在真實日曆上可能跳來跳去（這一筆是
@@ -299,7 +228,6 @@ export default function ModelTrainingPage() {
   const [wsStatus, setWsStatus] = useState<"connecting" | "connected" | "error" | "closed">("closed");
   const [progressByNode, setProgressByNode] = useState<Record<string, ProgressPoint[]>>({});
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [showFullEpochList, setShowFullEpochList] = useState(false);
   const [showJobIdDetail, setShowJobIdDetail] = useState(false);
   const [expandedFeature, setExpandedFeature] = useState<Record<string, boolean>>({});
   const [now, setNow] = useState(() => Date.now());
@@ -340,24 +268,6 @@ export default function ModelTrainingPage() {
   const [inferSelectedIdx, setInferSelectedIdx] = useState(0);
   const inferLoadedKeyRef = useRef<string | null>(null);
 
-  const lossChartRef = useRef<HTMLDivElement>(null);
-  const lossChartApiRef = useRef<IChartApi | null>(null);
-  const lossSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
-  const valLossSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
-
-  const accChartRef = useRef<HTMLDivElement>(null);
-  const accChartApiRef = useRef<IChartApi | null>(null);
-  const accSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
-  const valAccSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
-
-  // hover 中的 epoch（每張圖各自獨立）：null 代表沒在 hover，圖例退回顯示最新一輪的數值。
-  const [lossHoverEpoch, setLossHoverEpoch] = useState<number | null>(null);
-  const [accHoverEpoch, setAccHoverEpoch] = useState<number | null>(null);
-
-  // 使用者是否手動縮放/捲動過任一張圖——一旦動過，「已完成輪數自動貼齊滿版寬度」這個
-  // 預設行為就要讓步給使用者自己的視野，不能每次新資料進來就搶回去；換節點/任務時歸零。
-  const chartUserInteractedRef = useRef(false);
-
   // 即時視窗預覽／歷史瀏覽共用的主圖表（K 線 + 決策點 T 的 marker）。
   const previewChartRef = useRef<HTMLDivElement>(null);
   const previewChartApiRef = useRef<IChartApi | null>(null);
@@ -375,79 +285,10 @@ export default function ModelTrainingPage() {
   const loadGenRef = useRef(0);
   const [progressSyncError, setProgressSyncError] = useState(false);
 
-  // Loss/Accuracy 圖表是共用同一個 series instance 顯示「目前選定的節點」，不是每個節點
-  // 各自一份，所以「換節點/換 job」永遠都要整包 setData，不能靠「這個節點以前是不是畫過」
-  // 判斷——chartContextRef 記的是「圖表上現在顯示的是哪個 job+node」，renderStateRef 記的
-  // 才是「這個 job+node 上一次同步到畫面時，各 epoch 各是什麼值」，兩者用途不同。
-  const chartContextRef = useRef<{ jobId: string | null; nodeId: string | null }>({ jobId: null, nodeId: null });
-  const renderStateRef = useRef<Record<string, { points: Map<number, ProgressPoint>; maxEpoch: number | null }>>({});
-
   // 每秒跳動一次，只用來重新計算「N 秒前」這種相對時間文字，不觸發任何資料重抓。
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
-  }, []);
-
-  // ── 建立圖表 instance，只在掛載時建一次，之後只換資料不重建。容器 div 一定要無條件
-  // 掛載（不能包在 `job &&` 這種條件式渲染裡）——首次進頁 job 是 null，如果容器跟著 job
-  // 一起有條件掛載，這個只執行一次的 effect 第一次跑的時候容器根本不存在，之後 job 出現、
-  // 容器真的掛上去了，這個 [] 依賴的 effect 也不會重新執行，圖表就永遠是空的。
-  useEffect(() => {
-    if (!lossChartRef.current) return;
-    const chart = createChart(lossChartRef.current, {
-      layout: { background: { color: "transparent" }, textColor: "#a8adb8" },
-      grid: { vertLines: { color: "#23272d" }, horzLines: { color: "#23272d" } },
-      autoSize: true,
-      localization: { timeFormatter: (t: number) => `第 ${t} 輪` },
-      timeScale: { timeVisible: false, tickMarkFormatter: (t: number) => String(t) },
-    });
-    // 不設定 title——lightweight-charts 會在最後一筆資料旁邊常駐畫出「title + 數值」的
-    // 色塊標籤，priceLineVisible/lastValueVisible 都關不掉這個，只有不設定 title 才會消失。
-    // 這正是使用者要求移除的「遮擋曲線的右側大標籤」，改用上面的固定圖例（.model-chart-legend）
-    // 取代同樣的資訊。
-    lossSeriesRef.current = chart.addSeries(LineSeries, {
-      color: "#f0616b", priceLineVisible: false, lastValueVisible: false,
-    });
-    valLossSeriesRef.current = chart.addSeries(LineSeries, {
-      color: "#f0a13a", lineStyle: 2, priceLineVisible: false, lastValueVisible: false,
-    });
-    lossChartApiRef.current = chart;
-    chart.subscribeCrosshairMove((param) => {
-      setLossHoverEpoch(param.time === undefined ? null : (param.time as number) - 1);
-    });
-    const markInteracted = () => { chartUserInteractedRef.current = true; };
-    lossChartRef.current.addEventListener("wheel", markInteracted, { passive: true });
-    lossChartRef.current.addEventListener("mousedown", markInteracted);
-    lossChartRef.current.addEventListener("touchstart", markInteracted, { passive: true });
-    return () => chart.remove();
-  }, []);
-
-  useEffect(() => {
-    if (!accChartRef.current) return;
-    const chart = createChart(accChartRef.current, {
-      layout: { background: { color: "transparent" }, textColor: "#a8adb8" },
-      grid: { vertLines: { color: "#23272d" }, horzLines: { color: "#23272d" } },
-      autoSize: true,
-      localization: { timeFormatter: (t: number) => `第 ${t} 輪`, priceFormatter: (p: number) => `${(p * 100).toFixed(1)}%` },
-      timeScale: { timeVisible: false, tickMarkFormatter: (t: number) => String(t) },
-    });
-    accSeriesRef.current = chart.addSeries(LineSeries, {
-      color: "#3ecf8e", priceLineVisible: false, lastValueVisible: false,
-      priceFormat: { type: "custom", formatter: (p: number) => `${(p * 100).toFixed(1)}%`, minMove: 0.0001 },
-    });
-    valAccSeriesRef.current = chart.addSeries(LineSeries, {
-      color: "#3ab0cf", lineStyle: 2, priceLineVisible: false, lastValueVisible: false,
-      priceFormat: { type: "custom", formatter: (p: number) => `${(p * 100).toFixed(1)}%`, minMove: 0.0001 },
-    });
-    accChartApiRef.current = chart;
-    chart.subscribeCrosshairMove((param) => {
-      setAccHoverEpoch(param.time === undefined ? null : (param.time as number) - 1);
-    });
-    const markInteracted = () => { chartUserInteractedRef.current = true; };
-    accChartRef.current.addEventListener("wheel", markInteracted, { passive: true });
-    accChartRef.current.addEventListener("mousedown", markInteracted);
-    accChartRef.current.addEventListener("touchstart", markInteracted, { passive: true });
-    return () => chart.remove();
   }, []);
 
   useEffect(() => {
@@ -596,13 +437,6 @@ export default function ModelTrainingPage() {
     wsRef.current?.close();
     wsRef.current = null;
     setWsStatus("closed");
-    chartContextRef.current = { jobId: null, nodeId: null };
-    renderStateRef.current = {};
-    chartUserInteractedRef.current = false;
-    lossSeriesRef.current?.setData([]);
-    valLossSeriesRef.current?.setData([]);
-    accSeriesRef.current?.setData([]);
-    valAccSeriesRef.current?.setData([]);
 
     if (!activeJobId) {
       setStatus(mode === "latest" ? "目前無訓練" : "尚無訓練紀錄");
@@ -859,93 +693,6 @@ export default function ModelTrainingPage() {
     previewChartApiRef.current?.timeScale().fitContent();
   }, [displayedPreview]);
 
-  // 圖表同步只有一個 effect，內部按情境分流，不再拆成「先 update() 後 setData()」兩個各自
-  // 判斷 selectedNodeId 的 effect——那樣兩個 effect 誰先跑完全看宣告順序，換節點時「增量
-  // update()」那個永遠先跑，會拿新節點的資料去 update() 舊節點還留在圖表上的 series，一旦
-  // 新節點的 epoch 比舊節點畫到的位置早（例如舊節點已經到第 100 輪，新節點才第 1 輪），
-  // lightweight-charts 的 update() 會直接丟例外（時間往回退）。全部併進同一個 effect 之後，
-  // 順序不再是問題，改成用資料本身判斷屬於哪一種情境：
-  //   1) 首次載入 / 切換節點或任務 → chartContextRef 的 job/node 對不上了 → 整包 setData + fitContent
-  //   2) 純粹尾端追加新 epoch（沒有任何一筆是回頭補洞或改值）→ 用 update() 逐筆疊上去；
-  //      使用者沒手動縮放過就順便 fitContent()，讓已完成輪數預設充分使用圖表寬度——
-  //      動過縮放/捲動之後就尊重使用者的視野，不再搶回去。
-  //   3) 歷史補洞（epoch 比目前畫到的還舊）或既有 epoch 的數值被訂正 → 整包 setData 重畫，
-  //      使用者手動縮放過才需要保留原本可視範圍，否則一樣直接 fitContent()。
-  useEffect(() => {
-    if (!selectedNodeId || !activeJobId) return;
-    const key = `${activeJobId}:${selectedNodeId}`;
-    const pts = progressByNode[selectedNodeId] ?? [];
-
-    const contextChanged = chartContextRef.current.jobId !== activeJobId || chartContextRef.current.nodeId !== selectedNodeId;
-    chartContextRef.current = { jobId: activeJobId, nodeId: selectedNodeId };
-    if (contextChanged) chartUserInteractedRef.current = false;
-
-    let state = renderStateRef.current[key];
-    if (!state) {
-      state = { points: new Map(), maxEpoch: null };
-      renderStateRef.current[key] = state;
-    }
-
-    function setFullData() {
-      lossSeriesRef.current?.setData(pts.filter((p) => p.loss !== null).map((p) => ({ time: (p.epoch + 1) as unknown as Time, value: p.loss as number })));
-      valLossSeriesRef.current?.setData(pts.filter((p) => p.val_loss !== null).map((p) => ({ time: (p.epoch + 1) as unknown as Time, value: p.val_loss as number })));
-      accSeriesRef.current?.setData(pts.filter((p) => p.accuracy !== null).map((p) => ({ time: (p.epoch + 1) as unknown as Time, value: p.accuracy as number })));
-      valAccSeriesRef.current?.setData(pts.filter((p) => p.val_accuracy !== null).map((p) => ({ time: (p.epoch + 1) as unknown as Time, value: p.val_accuracy as number })));
-    }
-    function fitBoth() {
-      lossChartApiRef.current?.timeScale().fitContent();
-      accChartApiRef.current?.timeScale().fitContent();
-    }
-
-    if (contextChanged) {
-      // 首次顯示這個節點，或切換了節點/任務：圖表上現在顯示的內容跟這份資料完全無關，
-      // 一定要整包換掉，而且視野也該重新 fit（不同節點的輪數/尺度通常差很多）。
-      setFullData();
-      fitBoth();
-    } else {
-      let needsFullRedraw = false;
-      const appended: ProgressPoint[] = [];
-      for (const p of pts) {
-        const prev = state.points.get(p.epoch);
-        if (!prev) {
-          if (state.maxEpoch !== null && p.epoch <= state.maxEpoch) { needsFullRedraw = true; break; }
-          appended.push(p);
-        } else if (
-          prev.loss !== p.loss || prev.val_loss !== p.val_loss ||
-          prev.accuracy !== p.accuracy || prev.val_accuracy !== p.val_accuracy
-        ) {
-          needsFullRedraw = true; break; // 既有 epoch 的數值被訂正，不是單純新增
-        }
-      }
-      if (needsFullRedraw) {
-        if (chartUserInteractedRef.current) {
-          const lossRange = lossChartApiRef.current?.timeScale().getVisibleLogicalRange();
-          const accRange = accChartApiRef.current?.timeScale().getVisibleLogicalRange();
-          setFullData();
-          if (lossRange) lossChartApiRef.current?.timeScale().setVisibleLogicalRange(lossRange);
-          if (accRange) accChartApiRef.current?.timeScale().setVisibleLogicalRange(accRange);
-        } else {
-          setFullData();
-          fitBoth();
-        }
-      } else if (appended.length > 0) {
-        for (const p of appended.sort((a, b) => a.epoch - b.epoch)) {
-          const t = (p.epoch + 1) as unknown as Time;
-          if (p.loss !== null) lossSeriesRef.current?.update({ time: t, value: p.loss });
-          if (p.val_loss !== null) valLossSeriesRef.current?.update({ time: t, value: p.val_loss });
-          if (p.accuracy !== null) accSeriesRef.current?.update({ time: t, value: p.accuracy });
-          if (p.val_accuracy !== null) valAccSeriesRef.current?.update({ time: t, value: p.val_accuracy });
-        }
-        if (!chartUserInteractedRef.current) fitBoth();
-      }
-      // appended.length === 0 && !needsFullRedraw：完全沒有新資料，不用碰圖表
-    }
-
-    for (const p of pts) state.points.set(p.epoch, p);
-    if (pts.length) state.maxEpoch = pts[pts.length - 1].epoch;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [progressByNode, selectedNodeId, activeJobId]);
-
   const modelNodes = useMemo(() => trainGraphSpec?.nodes.filter((n): n is ModelNode => n.type === "model") ?? [], [trainGraphSpec]);
   const modelNode = modelNodes.find((n) => n.id === selectedNodeId) ?? modelNodes[0];
 
@@ -972,45 +719,10 @@ export default function ModelTrainingPage() {
 
   const featureLabel = (n: FeatureNode) => (n.key === "talib_indicator" ? String(n.params?.name ?? n.key) : n.key);
 
-  // LSTM 一輪是「掃過一次完整訓練集」（epoch），XGBoost 一輪是「長一棵樹」（boosting
-  // round）——兩者不是同一件事，訓練輪次的用詞要跟著模型架構走，不能都含糊叫「輪」。
+  // 輪次用詞（Epoch／Boosting 輪次）、要畫哪些曲線、指標意義，一律依後端的 metric_specs，不依架構名稱猜
   const isXgboostNode = modelNode?.key === "xgboost";
-  // 雙頭（送出的 params.heads="dual"）：loss 欄是「聯合損失」（回歸 MSE 與方向 BCE 的加權和）、
-  // accuracy 欄是「方向準確率」，不是單頭的 CrossEntropy／分類 accuracy。
-  const isDualNode = modelNode?.params?.heads === "dual";
-  const dualWeights = modelNode?.params?.loss_weights as { regression?: number; direction?: number } | undefined;
-  const roundNoun = isXgboostNode ? "Boosting 輪次" : "Epoch";
-  // 是不是回歸任務，不能只憑 labeling_rule 的名字猜（以後可能加新的 labeling_rule），
-  // 直接看逐輪指標本身：只要曾經回報過非 null 的 accuracy/val_accuracy 就是分類；
-  // 一筆資料都還沒有時無法判斷，先當作「還不知道」，交給既有的「等待第一輪回報」文案處理，
-  // 不要在資料還沒進來前就搶先斷言這是不是回歸——那樣本身也是一種沒有根據的推論。
-  const hasAccuracySignal = progressForSelected.some((p) => p.accuracy !== null || p.val_accuracy !== null);
-  const isRegressionTask = progressForSelected.length > 0 && !hasAccuracySignal;
-  // loss 實際上是哪種損失函數，跟架構＋任務型態都有關——error/merror 那種「分類錯誤率」
-  // 跟 CrossEntropyLoss 不是同一種東西，不能含糊都標成「Loss」，見 architectures.py
-  // train_xgboost() 這輪的修正說明。回歸任務資料還沒進來前不猜測，維持純「Loss」。
-  const lossKind = !progressForSelected.length
-    ? null
-    : isDualNode
-      ? `聯合損失${dualWeights ? ` ${dualWeights.regression}×MSE＋${dualWeights.direction}×BCE` : ""}`
-    : isXgboostNode
-      ? (isRegressionTask ? "RMSE" : "LogLoss")
-      : (isRegressionTask ? "MSE" : "CrossEntropy");
-
-  // Loss/Accuracy 圖表的橫軸單位（第幾個 Epoch／第幾個 Boosting 輪次）只有在選定節點的
-  // 架構確定之後才知道，但兩張圖的 chart instance 本身只在元件掛載時建立一次（見上面
-  // createChart 那兩個 effect 的說明，容器不能條件式掛載）——這裡用 applyOptions() 在
-  // 「架構已知/改變」時，對同一個既有的 chart instance 動態更新 timeFormatter，不重建圖表。
-  useEffect(() => {
-    const timeFormatter = (t: number) => `第 ${t} 輪（${roundNoun}）`;
-    lossChartApiRef.current?.applyOptions({ localization: { timeFormatter } });
-    accChartApiRef.current?.applyOptions({ localization: { timeFormatter, priceFormatter: (p: number) => `${(p * 100).toFixed(1)}%` } });
-  }, [roundNoun]);
-
-  // Loss/Accuracy 圖例：預設顯示最新一輪，滑鼠移到圖上時改顯示那一輪的 train/val 數值——
-  // 兩張圖各自獨立判斷 hover 狀態。
-  const lossLegendPoint = (lossHoverEpoch !== null ? progressForSelected.find((p) => p.epoch === lossHoverEpoch) : undefined) ?? latest;
-  const accLegendPoint = (accHoverEpoch !== null ? progressForSelected.find((p) => p.epoch === accHoverEpoch) : undefined) ?? latest;
+  const nodeSpecs = (modelNode ? (resultEntry?.metric_specs ?? job?.metric_specs?.[modelNode.id]) : null) ?? null;
+  const roundNoun = ROUND_NOUN[nodeSpecs?.round_unit ?? (isXgboostNode ? "boosting_round" : "epoch")] ?? "Epoch";
 
   return (
     <div className="model-page">
@@ -1375,9 +1087,8 @@ export default function ModelTrainingPage() {
             )}
           </div>
 
-          {/* C：訓練指標——Loss 跟 Accuracy 分成兩張獨立圖表，橫軸是訓練輪次。infer job
-              沒有訓練過程，一樣用 style 隱藏（理由同上，lossChartRef/accChartRef 容器也是
-              只在元件掛載時建立一次的 chart instance）。 */}
+          {/* C：訓練指標——曲線、評估與基準比較、逐類別、混淆矩陣，全部依 metric_specs／evaluations
+              由共用元件組合（見 components/metrics）。infer job 沒有訓練過程，不顯示。 */}
           <div className="model-progress-wrap" style={isInferJob ? { display: "none" } : undefined}>
             <div className="model-progress-header">
               <div className="model-left-title">訓練指標</div>
@@ -1387,105 +1098,13 @@ export default function ModelTrainingPage() {
                 </div>
               )}
             </div>
-            <div className="model-progress-charts">
-              <div className="model-progress-chart-block">
-                <div className="model-chart-label">Loss{lossKind && `（${lossKind}）`}</div>
-                <div className="model-progress-chart-inner">
-                  {job && progressForSelected.length === 0 && (status === "pending" || status === "running") && (
-                    <div className="model-progress-waiting">等待第一{roundNoun}回報…</div>
-                  )}
-                  {job && progressForSelected.length > 0 && (
-                    <div className="model-chart-legend">
-                      <span className="model-legend-item"><i className="model-legend-swatch is-solid" style={{ background: "#f0616b" }} />train {fmt(lossLegendPoint?.loss, 4)}</span>
-                      <span className="model-legend-item"><i className="model-legend-swatch is-dashed" style={{ borderColor: "#f0a13a" }} />val {fmt(lossLegendPoint?.val_loss, 4)}</span>
-                      {lossLegendPoint && <span className="model-legend-epoch">第 {lossLegendPoint.epoch + 1}（{roundNoun}）</span>}
-                    </div>
-                  )}
-                  <div ref={lossChartRef} className="model-progress-chart" />
-                </div>
-              </div>
-              <div className="model-progress-chart-block">
-                <div className="model-chart-label">{isDualNode ? "方向準確率（dir_acc，機率 0.5 為界）" : "Accuracy"}</div>
-                <div className="model-progress-chart-inner">
-                  {job && progressForSelected.length === 0 && (status === "pending" || status === "running") && (
-                    <div className="model-progress-waiting">等待第一{roundNoun}回報…</div>
-                  )}
-                  {/* 回歸任務沒有 accuracy 這種東西，不虛構一個數字、也不留一張看起來像是
-                      壞掉／永遠等不到資料的空圖表——直接明講這裡不適用，改看 Loss 那張。 */}
-                  {job && isRegressionTask && (
-                    <div className="model-progress-waiting">此為回歸任務，沒有 Accuracy 指標，請參考左側 Loss（{lossKind}）</div>
-                  )}
-                  {job && progressForSelected.length > 0 && !isRegressionTask && (
-                    <div className="model-chart-legend">
-                      <span className="model-legend-item"><i className="model-legend-swatch is-solid" style={{ background: "#3ecf8e" }} />train {fmtPct(accLegendPoint?.accuracy)}</span>
-                      <span className="model-legend-item"><i className="model-legend-swatch is-dashed" style={{ borderColor: "#3ab0cf" }} />val {fmtPct(accLegendPoint?.val_accuracy)}</span>
-                      {accLegendPoint && <span className="model-legend-epoch">第 {accLegendPoint.epoch + 1}（{roundNoun}）</span>}
-                    </div>
-                  )}
-                  <div ref={accChartRef} className="model-progress-chart" style={isRegressionTask ? { display: "none" } : undefined} />
-                </div>
-              </div>
-            </div>
-
-            {job && ((isDualNode && latest?.metrics) || resultEntry?.final_metrics) && (
-              <div className="model-dual-metrics">
-                {isDualNode && latest?.metrics && (
-                  <div className="model-dual-metrics-block">
-                    <div className="model-dual-metrics-title">最新一輪（train／val）</div>
-                    {DUAL_METRICS.map(([key, label, pct]) => (
-                      <div className="model-preview-info-row" key={key}>
-                        <span>{label}</span>
-                        <strong>{fmtDual(latest.metrics?.[key], pct)}／{fmtDual(latest.metrics?.[`val_${key}`], pct)}</strong>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {resultEntry?.final_metrics && <FinalModelPanel fm={resultEntry.final_metrics} roundNoun={roundNoun} />}
-                {resultEntry?.evaluation && <EvaluationPanel evaluation={resultEntry.evaluation} />}
-              </div>
-            )}
-
             {job && (
-              <>
-                <button type="button" className="model-epoch-toggle" onClick={() => setShowFullEpochList((v) => !v)}>
-                  {showFullEpochList ? "收起" : "展開"}逐輪明細（{progressForSelected.length} 筆）
-                </button>
-                {showFullEpochList && (
-                  <div className="model-epoch-list">
-                    {isDualNode ? (
-                      <>
-                        <div className="model-epoch-row model-epoch-header model-epoch-row-dual">
-                          <span>epoch</span>{DUAL_METRICS.flatMap(([key]) => [<span key={key}>{key}</span>, <span key={`v${key}`}>val_{key}</span>])}
-                        </div>
-                        {progressForSelected.map((p) => (
-                          <div className="model-epoch-row model-epoch-row-dual" key={p.epoch}>
-                            <span>{p.epoch}</span>
-                            {DUAL_METRICS.flatMap(([key, , pct]) => [
-                              <span key={key}>{fmtDual(p.metrics?.[key], pct)}</span>,
-                              <span key={`v${key}`}>{fmtDual(p.metrics?.[`val_${key}`], pct)}</span>,
-                            ])}
-                          </div>
-                        ))}
-                      </>
-                    ) : (
-                      <>
-                        <div className="model-epoch-row model-epoch-header">
-                          <span>epoch</span><span>loss</span><span>accuracy</span><span>val_loss</span><span>val_accuracy</span>
-                        </div>
-                        {progressForSelected.map((p) => (
-                          <div className="model-epoch-row" key={p.epoch}>
-                            <span>{p.epoch}</span>
-                            <span>{fmt(p.loss)}</span>
-                            <span>{fmtPct(p.accuracy)}</span>
-                            <span>{fmt(p.val_loss)}</span>
-                            <span>{fmtPct(p.val_accuracy)}</span>
-                          </div>
-                        ))}
-                      </>
-                    )}
-                  </div>
-                )}
-              </>
+              <MetricsDashboard
+                specs={nodeSpecs}
+                points={progressForSelected}
+                evaluations={resultEntry?.evaluations ?? []}
+                waitingText={status === "pending" || status === "running" ? `等待第一${roundNoun}回報…` : "這筆紀錄沒有逐輪資料"}
+              />
             )}
           </div>
         </div>

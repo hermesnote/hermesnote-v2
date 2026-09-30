@@ -471,8 +471,10 @@ class GraphIntegrationTests(unittest.TestCase):
         finally:
             worker_mod.write_progress, worker_mod.save_artifacts_for_job, worker_mod.save_preview_sample = orig
         summary = result["dual"]
-        self.assertEqual(sorted(summary), ["device", "evaluation", "final_metrics", "output_specs", "training_meta"])
-        self.assertLess(len(json.dumps(result)), 12000)  # 完整評估報告（含 evaluation）比純量摘要大，但仍是小型 O(類別數) 的量級
+        self.assertEqual(sorted(summary), ["device", "evaluations", "final_metrics", "metric_specs", "output_specs",
+                                           "training_meta"])
+        # evaluations（best／last × 兩個輸出頭）＋metric_specs（含指標定義）仍是 O(類別數) 的小量級
+        self.assertLess(len(json.dumps(result)), 20000)
         self.assertNotIn("prediction_source", json.dumps(result))
         top_level_scalars = {k: v for k, v in summary["final_metrics"].items() if k != "last"}
         self.assertTrue(all(np.isscalar(v) or isinstance(v, (str, bool)) for v in top_level_scalars.values()))

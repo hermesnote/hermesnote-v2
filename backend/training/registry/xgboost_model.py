@@ -48,7 +48,29 @@ def _predictors(booster, is_cls: bool, n_classes: int) -> dict:
     return {"predict": lambda X: predict_proba(X).argmax(axis=1), "predict_proba": predict_proba}
 
 
-@register(KEY, family="xgboost", label="XGBoost", params_schema=PARAMS_SCHEMA,
+def metric_specs(node: dict, label_node: dict, task_type: str) -> dict:
+    """逐輪序列鍵對應 train_xgboost 的 on_epoch（loss＝監控指標；分類 accuracy＝1−error）。"""
+    from training.output_specs import label_metadata
+    from training.registry import metrics as M
+
+    if task_type == "classification":
+        n_classes = int((label_node.get("params") or {}).get("n_classes", 2))
+        heads = [{"key": "default", "label": "輸出", "task": "classification"}]
+        series = [
+            {"id": "loss", "metric": "logloss" if n_classes == 2 else "mlogloss", "head": "default",
+             "train": "loss", "val": "val_loss"},
+            {"id": "accuracy", "metric": "accuracy", "head": "default", "train": "accuracy", "val": "val_accuracy"},
+        ]
+        evaluation = {"default": M.CLASSIFICATION_EVAL}
+    else:
+        heads = [{"key": "default", "label": "輸出", "task": "regression",
+                  "target_unit": label_metadata(label_node, task_type)["unit"]}]
+        series = [{"id": "loss", "metric": "rmse", "head": "default", "train": "loss", "val": "val_loss"}]
+        evaluation = {"default": M.REGRESSION_EVAL}
+    return M.build_specs(round_unit="boosting_round", heads=heads, series=series, evaluation=evaluation)
+
+
+@register(KEY, family="xgboost", label="XGBoost", params_schema=PARAMS_SCHEMA, metric_specs=metric_specs,
           capabilities={"bidirectional": "fixed_off", "attention": "fixed_off", "dual_head": "fixed_off",
                         "optimizer": "fixed_off"})
 def train_xgboost(X_train, y_train, X_val, y_val, cfg: dict, on_epoch, task_type: str = "classification", *,

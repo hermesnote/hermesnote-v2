@@ -412,6 +412,9 @@ def run_graph(
                 "split_strategy": split_strategy,
                 "n_train": len(train_idx), "n_val": len(val_idx),
                 "n_excluded_boundary": n_excluded_boundary,
+                # 切分條件：驗證集怎麼選出來的（random 用固定種子 42 打亂；chronological 取時間最後一段）
+                "n_samples": int(n_samples), "val_ratio": val_ratio,
+                "split_seed": 42 if split_strategy != "chronological" else None,
                 "preprocessing": "minmax",
                 # 樣本 ts = 輸入最後一根棒的識別時間（棒起點）；available_ts 有值代表預覽／推論
                 # 另外帶了資訊可用時間（見 training/time_semantics.py）

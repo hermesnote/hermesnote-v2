@@ -22,6 +22,8 @@ from training.inference_store import list_predictions
 from training.phases import build_phase2_graph_spec, final_model_node_id, validate_parent_for_phase
 from training.preview_store import PREVIEW_CHANNEL_PREFIX, get_preview_sample, list_preview_samples
 from training.progress import CHANNEL_PREFIX
+from training.evaluation_records import enrich_job
+from training.registry import metrics as metrics_registry
 from training.registry import architectures, decision_rules, features, labeling_rules, outcomes, target_transforms
 
 router = APIRouter(prefix="/api/model", tags=["model_training"])
@@ -95,7 +97,8 @@ async def start_training(body: TrainRequest):
 
 @router.get("/jobs")
 async def list_training_jobs(limit: int = 20):
-    return await job_store.list_jobs(limit)
+    # metric_specs／evaluations：新紀錄用保存的，舊紀錄（evaluation.best／last）讀取時即時轉換，不改寫資料庫
+    return [enrich_job(j) for j in await job_store.list_jobs(limit)]
 
 
 @router.get("/jobs/{job_id}")
@@ -103,7 +106,7 @@ async def get_training_job(job_id: str):
     job = await job_store.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="找不到這個訓練任務")
-    return job
+    return enrich_job(job)
 
 
 @router.delete("/jobs/{job_id}")
@@ -314,6 +317,12 @@ def get_architecture_registry():
 def get_target_transform_registry():
     """由連續目標推導另一個學習目標（例如方向標籤）的可插拔規則，architecture 依 payload 的設定引用。"""
     return target_transforms.list_available()
+
+
+@router.get("/registry/metrics")
+def get_metric_registry():
+    """指標定義（可共用元件）：label／shape／direction／unit／format；模型的 metric_specs 引用這些指標。"""
+    return metrics_registry.list_available()
 
 
 @router.get("/registry/components/{registry}")
