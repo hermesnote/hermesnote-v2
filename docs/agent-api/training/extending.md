@@ -158,9 +158,19 @@ class AdamW:
 register("sharpe", label="Sharpe ratio", direction="max", unit="ratio", fmt="decimal", description="…")
 ```
 
-- `shape` 決定前端元件：`scalar`（逐輪曲線、數值比較）、`per_class`（逐類別表）、`distribution`（分布）、`matrix`（熱圖，值為 `{labels, values, row_axis, col_axis}`）。
+- `shape` 決定前端元件與評估報告裡的資料契約：
+
+  | shape | 評估報告裡的值 | 前端元件 |
+  |---|---|---|
+  | `scalar` | 數值或 `null`（附 `<key>_unavailable_reason`） | 逐輪曲線、`MetricCompare` |
+  | `per_class` | `{類別: {欄位: 值}}`，欄位自訂 | `PerClassTable` |
+  | `distribution` | `{類別: 數值}` | `DistributionBars` |
+  | `matrix` | 二維陣列；標籤放 `<key>_labels`；登記時給 `axes={"row": …, "col": …}` | `MatrixHeatmap` |
+
+- 衍生指標：登記時給 `derive={"from": 來源指標, "method": "matrix_diagonal_ratio"}`（方法在 `metrics.DERIVATIONS`，需要新方法就加一個函式）。
+- 新基準：評估報告放 `baseline_<名稱>` 物件（`method`＋同名指標數值），在 `metrics.register_baseline()` 登記名稱與標籤（未登記時以名稱本身顯示）。
 - 逐輪指標：在模型 `on_epoch` 回報對應欄位（例如 `sharpe`／`val_sharpe`）並加進 `series`；評估指標：在評估報告產生對應鍵並加進 `evaluation[head]`。
-- 前端（`frontend/src/components/metrics/`）依 `shape`／`direction`／`unit`／`format` 呈現，不需要改頁面。
+- 評估轉換（`training/evaluation_records.py`）與前端（`frontend/src/components/metrics/`）都依登記的 shape 分派，沒有固定指標清單；同形態的新指標不用改程式。未登記的鍵不會出現在評估清單（`tests/test_evaluation_records.py` 核對 `evaluation.py` 產生的鍵都已登記）。
 
 ## 新增一種可插拔位置（新的元件登記表）
 

@@ -185,10 +185,73 @@ class NewJobSummaryTests(unittest.TestCase):
     def test_same_builder_for_new_and_old(self):
         spec, results, _ = run("xgb_reg")
         r = results["m"]
+        specs = architectures.metric_specs("xgboost", spec["nodes"][-1], spec["nodes"][1], "regression")
         direct = build_evaluations("m", r["evaluation"], node=spec["nodes"][-1], final_metrics=r["final_metrics"],
                                    training_meta=r["training_meta"], phase=1,
-                                   task_range={"start": spec["start"], "end": spec["end"]}, round_unit="boosting_round")
+                                   task_range={"start": spec["start"], "end": spec["end"]}, specs=specs)
         self.assertEqual(direct, worker._summarize(results, spec, phase=1)["m"]["evaluations"])
+
+
+class ShapeDrivenTests(unittest.TestCase):
+    """評估轉換不靠固定指標清單：報告裡已登記的指標依 shape 與資料契約納入。"""
+
+    def test_every_key_produced_by_evaluation_is_registered(self):
+        registry = metrics.METRIC_REGISTRY
+        for case in CASES:
+            with self.subTest(case=case):
+                _, results, _ = run(case)
+                reports = [results["m"]["evaluation"]["best"]]
+                if "direction" in reports[0]:
+                    reports = [reports[0]["direction"], reports[0]["regression"]]
+                for rep in reports:
+                    for k in rep:
+                        if k.endswith("_unavailable_reason") or k.endswith("_labels"):
+                            continue
+                        if k.startswith("baseline_"):
+                            self.assertIn(k, metrics.BASELINE_REGISTRY)
+                            continue
+                        self.assertIn(k, registry, f"{case}: 評估報告的 {k} 沒有登記，會從評估清單消失")
+
+    def test_new_metric_names_reuse_contract_by_shape(self):
+        """用新名稱的指標（各種 shape＋衍生＋新基準）驗證：只登記、不改轉換程式就能進評估清單。"""
+        from training.evaluation_records import _report_to_metrics
+
+        added = {
+            "regime_transition_matrix": dict(label="狀態轉移矩陣", shape="matrix", unit="count", fmt="int",
+                                             axes={"row": "前一狀態", "col": "後一狀態"}),
+            "regime_stay_ratio": dict(label="狀態停留比例", direction="max", unit="ratio", fmt="percent",
+                                      derive={"from": "regime_transition_matrix", "method": "matrix_diagonal_ratio"}),
+            "per_regime": dict(label="逐狀態指標", shape="per_class", unit="ratio"),
+            "regime_counts": dict(label="狀態分布", shape="distribution", unit="count", fmt="int"),
+            "hit_rate": dict(label="Hit rate", direction="max", unit="ratio", fmt="percent"),
+        }
+        for k, kw in added.items():
+            metrics.register(k, **kw)
+        try:
+            report = {
+                "regime_transition_matrix": [[8, 2], [1, 9]], "regime_transition_matrix_labels": ["盤整", "趨勢"],
+                "per_regime": {"盤整": {"hit": 0.6, "n": 10}}, "regime_counts": {"盤整": 10, "趨勢": 10},
+                "hit_rate": None, "hit_rate_unavailable_reason": "樣本不足",
+                "not_registered_key": 123,
+                "baseline_coin_flip": {"method": "random_50_50", "hit_rate": 0.5, "seed": 7},
+            }
+            m, unavailable, baselines = _report_to_metrics(report)
+            self.assertEqual(m["regime_transition_matrix"], {"labels": ["盤整", "趨勢"], "values": [[8, 2], [1, 9]],
+                                                             "row_axis": "前一狀態", "col_axis": "後一狀態"})
+            self.assertAlmostEqual(m["regime_stay_ratio"], 17 / 20)
+            self.assertEqual((m["per_regime"], m["regime_counts"], m["hit_rate"]),
+                             (report["per_regime"], report["regime_counts"], None))
+            self.assertNotIn("not_registered_key", m)
+            self.assertEqual(unavailable, {"hit_rate": "樣本不足"})
+            self.assertEqual(baselines, [{"key": "coin_flip", "label": "coin_flip", "available": True,
+                                          "method": "random_50_50", "metrics": {"hit_rate": 0.5}, "detail": {"seed": 7}}])
+        finally:
+            for k in added:
+                metrics.METRIC_REGISTRY.pop(k)
+
+    def test_unknown_shape_rejected(self):
+        with self.assertRaises(ValueError):
+            metrics.register("bad", label="bad", shape="cube")
 
 
 if __name__ == "__main__":

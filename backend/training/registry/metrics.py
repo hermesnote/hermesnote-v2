@@ -8,6 +8,14 @@
              metric_specs 的 heads[].target_unit）／target_squared／ratio（0～1 比例）／count
   format     percent／decimal／int（顯示建議）
 
+資料契約（評估報告裡的值，依 shape）：
+  scalar        數值（可為 null，並在報告附 `<key>_unavailable_reason`）
+  per_class     {類別: {欄位: 數值, ...}}（欄位由資料決定，例如 precision／recall／f1／support）
+  distribution  {類別: 數值}
+  matrix        二維陣列；列／欄標籤放在報告的 `<key>_labels`，軸名稱由定義的 `axes` 宣告
+衍生指標：定義帶 `derive={"from": 來源指標, "method": DERIVATIONS 的名稱}`，報告沒有時由來源推算。
+基準：報告裡 `baseline_<名稱>` 物件（含 method 與同名指標數值），名稱與顯示標籤在 BASELINE_REGISTRY 登記。
+
 模型用 `metric_specs(node, label_node, task_type)`（見 architectures.register 的 metric_specs）宣告
 這個設定會產生哪些逐輪序列、哪些評估指標、屬於哪個輸出頭；引用的指標必須在這裡登記。
 新指標＝在這裡登記＋模型引用，前端依 shape 自動用對應元件呈現。
@@ -16,10 +24,35 @@
 METRIC_REGISTRY: dict = {}
 
 
+BASELINE_REGISTRY: dict = {}
+SHAPES = ("scalar", "per_class", "distribution", "matrix")
+
+
 def register(key: str, *, label: str, shape: str = "scalar", direction: str | None = None,
-             unit: str = "ratio", fmt: str = "decimal", description: str = ""):
+             unit: str = "ratio", fmt: str = "decimal", description: str = "",
+             axes: dict | None = None, derive: dict | None = None):
+    if shape not in SHAPES:
+        raise ValueError(f"未知的 shape：{shape!r}，可用：{SHAPES}")
     METRIC_REGISTRY[key] = {"key": key, "label": label, "shape": shape, "direction": direction,
                             "unit": unit, "format": fmt, "description": description}
+    if axes is not None:
+        METRIC_REGISTRY[key]["axes"] = axes
+    if derive is not None:
+        METRIC_REGISTRY[key]["derive"] = derive
+
+
+def register_baseline(raw_key: str, *, key: str, label: str, description: str = ""):
+    """評估報告裡的 `baseline_*` 物件 → 評估清單的基準名稱與顯示標籤。"""
+    BASELINE_REGISTRY[raw_key] = {"key": key, "label": label, "description": description}
+
+
+def _matrix_diagonal_ratio(matrix):
+    total = sum(sum(row) for row in matrix)
+    return sum(matrix[i][i] for i in range(len(matrix))) / total if total else None
+
+
+# 衍生指標的推算方法：名稱 → (來源值 → 數值)
+DERIVATIONS = {"matrix_diagonal_ratio": _matrix_diagonal_ratio}
 
 
 # ── 損失 ──
@@ -36,7 +69,8 @@ register("rmse", label="RMSE", direction="min", unit="target", description="均�
 register("mae", label="MAE", direction="min", unit="target", description="平均絕對誤差")
 register("r2", label="R²", direction="max", unit="ratio", description="決定係數")
 # ── 分類 ──
-register("accuracy", label="Accuracy", direction="max", unit="ratio", fmt="percent", description="預測正確比例")
+register("accuracy", label="Accuracy", direction="max", unit="ratio", fmt="percent", description="預測正確比例",
+         derive={"from": "confusion_matrix", "method": "matrix_diagonal_ratio"})
 register("dir_acc", label="方向準確率", direction="max", unit="ratio", fmt="percent",
          description="方向頭：機率以 0.5 為界判定事件，與實際事件相符的比例")
 register("balanced_accuracy", label="Balanced accuracy", direction="max", unit="ratio", fmt="percent",
@@ -51,7 +85,13 @@ register("per_class", label="逐類別指標", shape="per_class", unit="ratio",
 register("class_distribution", label="類別分布", shape="distribution", unit="count", fmt="int",
          description="評估資料集中各類別的實際樣本數")
 register("confusion_matrix", label="混淆矩陣", shape="matrix", unit="count", fmt="int",
-         description="列＝實際類別、欄＝預測類別")
+         description="列＝實際類別、欄＝預測類別", axes={"row": "實際", "col": "預測"})
+
+# ── 基準（training/evaluation.py 的 baseline_* 物件）──
+register_baseline("baseline_majority_class", key="majority_class", label="訓練集多數類別",
+                  description="一律預測訓練集最多的類別")
+register_baseline("baseline_mean", key="train_mean", label="預測訓練集平均")
+register_baseline("baseline_zero", key="zero", label="預測零")
 
 CLASSIFICATION_EVAL = ["accuracy", "balanced_accuracy", "macro_f1", "roc_auc", "average_precision",
                        "per_class", "class_distribution", "confusion_matrix"]

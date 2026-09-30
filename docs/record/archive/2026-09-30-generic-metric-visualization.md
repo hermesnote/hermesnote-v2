@@ -50,3 +50,13 @@
 
 Hermes 核准本輪與相關文件一起提交：後端（`registry/metrics.py`、`evaluation_records.py`、architectures／lstm／xgboost_model 的 `metric_specs`、worker、job_store、graph 的 `training_meta`、router）、前端（`components/metrics/`、`ModelTrainingPage.tsx`、`ModelSettings.tsx`，刪除 `pages/evaluationRows.ts`）、測試、`docs/agent-api/training/`、`docs/spec.md`／`architecture.md`／`decisions.md`（2026-09-29 整理的三份，含本輪 D-036 等更新）、`docs/index.md`（只提交三份文件的索引列與閱讀順序；他人新增的 agent-workflow／HA 手冊列未納入）、`docs/record/`。部署待目前 5 分 K 訓練完成、確認無 pending／running 任務後再安排，HA 解析更新同步銜接。
 
+## GC 檢閱修正（追加提交）
+
+GC 指出：前端非數值元件依固定 key（`per_class`／`class_distribution`／`confusion_matrix`）分派，評估轉換也用固定指標清單、固定基準表、固定雙頭 key。修正為由指標登記的 shape 與資料契約分派：
+
+- 後端 `registry/metrics.py`：`register()` 加 `axes`（矩陣軸名稱）與 `derive`（衍生指標，`DERIVATIONS` 方法表；accuracy 改為登記 `derive={"from": "confusion_matrix", "method": "matrix_diagonal_ratio"}`）；新增 `BASELINE_REGISTRY`／`register_baseline()`；未知 shape 直接拒絕。
+- `evaluation_records.py`：報告裡凡是已登記的指標都依 shape 轉成資料契約（matrix＝`<key>`＋`<key>_labels`＋定義的 `axes`）；衍生指標依登記推算；`baseline_*` 依基準登記命名，基準的 `metrics` 只取已登記指標、其他欄位放 `detail`；輸出頭依 `metric_specs.heads` 拆分（不再寫死 `direction`／`regression`）；`build_evaluations` 改收 `specs`。
+- 前端：`PerClassTable`／`DistributionBars`／`MatrixHeatmap` 改以 `metricKey` 參數讀資料，per_class 欄位由資料決定；`EvaluationView` 依 `definitions[key].shape` 分派（沒有定義時由資料推斷 shape）。
+- 驗證：新增 3 項測試——`evaluation.py` 產生的鍵都已登記；以新名稱指標（`regime_transition_matrix` 矩陣＋自訂軸、`regime_stay_ratio` 衍生、`per_regime`、`regime_counts`、`hit_rate`、新基準 `baseline_coin_flip`）只登記不改程式即進入評估清單、未登記鍵不納入；未知 shape 拒絕。後端 201 項通過、harness ALL MATCH、正式 3 筆 138 個數值仍逐一相同。畫面：同一批新名稱指標在評估區分別以熱圖（自訂軸名）、逐類別表（欄位 hit／n）、分布、數值比較（含新基準）呈現；正式雙頭紀錄呈現與修正前相同。
+- 文件：api.md（資料契約、依 shape 解析）、extending.md（shape 契約表、衍生指標、新基準）。
+

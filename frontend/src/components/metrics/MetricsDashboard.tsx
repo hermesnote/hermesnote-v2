@@ -6,7 +6,7 @@ import { useMemo, useState } from "react";
 import MetricSeriesChart, { type RefLine } from "./MetricSeriesChart";
 import { DistributionBars, MatrixHeatmap, MetricCompare, PerClassTable } from "./EvaluationParts";
 import {
-  formatValue, pointValue, ROUND_NOUN, type EvaluationRecord, type MetricDef, type MetricSpecs, type ProgressPoint, type SeriesSpec,
+  formatValue, pointValue, ROUND_NOUN, shapeOf, type EvaluationRecord, type MetricDef, type MetricSpecs, type ProgressPoint, type SeriesSpec,
 } from "./metricsModel";
 import "./metrics.css";
 
@@ -49,8 +49,9 @@ export function EvaluationView({ specs, evaluations, compact = false }: {
   const defs = specs?.definitions ?? {};
   const headSpec = specs?.heads.find((h) => h.key === activeHead);
   const declared = specs?.evaluation[activeHead ?? ""] ?? Object.keys(records[0]?.metrics ?? {});
-  const shapeOf = (k: string) => defs[k]?.shape ?? (typeof records[0]?.metrics[k] === "number" ? "scalar" : "other");
-  const scalarKeys = declared.filter((k) => shapeOf(k) === "scalar");
+  const shapeFor = (k: string) => shapeOf(defs[k], records.map((r) => r.metrics[k]).find((v) => v !== undefined));
+  const byShape = (shape: string) => declared.filter((k) => shapeFor(k) === shape);
+  const scalarKeys = byShape("scalar");
   const ds = shown[0]?.dataset ?? records[0]?.dataset;
   const primary = shown.find((r) => r.point.kind === "best") ?? shown[0];
   const stop = (e: { stopPropagation: () => void }) => e.stopPropagation();
@@ -108,16 +109,13 @@ export function EvaluationView({ specs, evaluations, compact = false }: {
       {(primary?.baselines ?? []).filter((b) => !b.available).map((b) => (
         <div key={b.key} className="mv-dim">基準「{b.label}」無法計算：{b.reason}</div>
       ))}
-      {!compact && (
-        <>
-          {declared.includes("per_class") && <PerClassTable records={shown} def={defs.per_class} />}
-          <div className="mv-grid">
-            {declared.includes("class_distribution") && primary && <DistributionBars record={primary} def={defs.class_distribution} />}
-            {declared.includes("confusion_matrix") && shown.map((r) => <MatrixHeatmap key={r.id} record={r} def={defs.confusion_matrix} />)}
-          </div>
-        </>
-      )}
-      {compact && declared.includes("confusion_matrix") && primary && <MatrixHeatmap record={primary} def={defs.confusion_matrix} />}
+      {!compact && byShape("per_class").map((k) => <PerClassTable key={k} records={shown} metricKey={k} def={defs[k]} />)}
+      <div className="mv-grid">
+        {!compact && primary && byShape("distribution").map((k) => <DistributionBars key={k} record={primary} metricKey={k} def={defs[k]} />)}
+        {byShape("matrix").flatMap((k) => (compact ? (primary ? [primary] : []) : shown).map((r) => (
+          <MatrixHeatmap key={`${k}:${r.id}`} record={r} metricKey={k} def={defs[k]} />
+        )))}
+      </div>
     </div>
   );
 }

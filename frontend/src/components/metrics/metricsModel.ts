@@ -93,6 +93,20 @@ export function directionHint(def: MetricDef | undefined): string {
   return def?.direction === "max" ? "越高越好" : def?.direction === "min" ? "越低越好" : "";
 }
 
+/** 依定義的 shape；沒有定義（未宣告的舊資料）時由資料契約推斷。 */
+export function shapeOf(def: MetricDef | undefined, value: unknown): MetricDef["shape"] | null {
+  if (def) return def.shape;
+  if (typeof value === "number" || value === null) return "scalar";
+  if (value && typeof value === "object") {
+    const o = value as Record<string, unknown>;
+    if (Array.isArray(o.values)) return "matrix";
+    const inner = Object.values(o);
+    if (inner.every((x) => typeof x === "number")) return "distribution";
+    if (inner.every((x) => x && typeof x === "object")) return "per_class";
+  }
+  return null;
+}
+
 export function num(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }

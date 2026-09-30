@@ -418,9 +418,9 @@ GET /api/model/registry/components/optimizer
 | `dataset.n_samples`／`n_train`／`n_total` | 驗證集樣本數／訓練樣本數／切分前樣本總數 |
 | `point.kind` | `best`／`last`；預留 `checkpoint`。`round` 由 0 起算，`label` 是顯示用（由 1 起算）；`weights` 對應 `/infer` 的 `use_weights` |
 | `point.selected_by` | best 的挑選依據（監控指標、方向、patience） |
-| `metrics` | 鍵＝指標登記表的 key；值的形狀依定義的 `shape`：`scalar` 數值、`per_class` 物件、`distribution` 物件、`matrix` 為 `{labels, values, row_axis, col_axis}`。`accuracy` 由混淆矩陣推算（對角線／總數） |
+| `metrics` | 鍵＝指標登記表的 key（報告裡凡是已登記的指標都納入，沒有固定清單）；值的形狀依定義的 `shape`：`scalar` 數值（或 `null`）、`per_class` 為 `{類別: {欄位: 值}}`（欄位由資料決定）、`distribution` 為 `{類別: 數值}`、`matrix` 為 `{labels, values, row_axis, col_axis}`（軸名稱來自定義的 `axes`）。衍生指標依定義的 `derive` 推算，例如 `accuracy` 由混淆矩陣對角線／總數 |
 | `unavailable` | 算不出的指標與原因（該指標在 `metrics` 裡是 `null`），例如驗證集缺類別時的多分類 ROC-AUC、多分類 AP |
-| `baselines` | 適用的簡單基準：分類 `majority_class`（訓練集多數類別）；回歸 `train_mean`（預測訓練集平均）、`zero`（預測零）。`available=false` 時附 `reason` |
+| `baselines` | 適用的簡單基準：分類 `majority_class`（訓練集多數類別）；回歸 `train_mean`（預測訓練集平均）、`zero`（預測零）。`metrics` 只含已登記的指標，其他欄位（例如多數類別是哪一類）在 `detail`；`available=false` 時附 `reason` |
 
 回歸頭的 `metrics` 是 `{"mse", "rmse", "mae", "r2"}`（`mse` 在目標原單位²，`rmse`／`mae` 在目標原單位，單位見 `metric_specs.heads[].target_unit`）。**`average_precision`（AP）不是梯形積分的 PR-AUC。** 數值不會出現 NaN（JSONB 一律存 `null`）。
 
@@ -444,7 +444,8 @@ GET /api/model/registry/components/optimizer
 - `round_unit`：`epoch`（LSTM）或 `boosting_round`（XGBoost）。
 - `series`：逐輪序列。`train`／`val` 是逐輪紀錄（`/progress`、WebSocket）裡的欄位名——固定四欄 `loss`／`accuracy`／`val_loss`／`val_accuracy` 在最上層，其他在 `metrics` 物件裡。`unit` 有值時覆寫定義的單位（例：LSTM 回歸的訓練 MSE 在損失空間）。
 - 同一個 `loss` 欄位在不同模型意義不同，一律看 `series[].metric`：LSTM 分類 `cross_entropy`、LSTM 回歸 `mse`（損失空間）、XGBoost 分類 `logloss`／`mlogloss`、XGBoost 回歸 `rmse`；雙頭 LSTM 的序列是 `joint_loss`（聯合）、`rmse`／`mse`（回歸頭）、`dir_acc`／`bce`（方向頭）。
-- `definitions`：引用指標的定義——`direction`（`min` 越低越好／`max` 越高越好）、`unit`（`loss_space`／`target`／`target_squared`／`ratio`／`count`）、`shape`、`format`（`percent`／`decimal`／`int`）。全部指標：`GET /api/model/registry/metrics`。
+- `definitions`：引用指標的定義——`direction`（`min` 越低越好／`max` 越高越好）、`unit`（`loss_space`／`target`／`target_squared`／`ratio`／`count`）、`shape`、`format`（`percent`／`decimal`／`int`）；矩陣另有 `axes`（`{row, col}`），衍生指標另有 `derive`（`{from, method}`）。全部指標：`GET /api/model/registry/metrics`。
+- 解析時依 `definitions[key].shape` 處理 `metrics[key]`，不要依指標名稱寫死；新增的同形態指標會照同一契約出現。
 
 ### 從 `evaluation.best／last` 改讀 `evaluations`（HA 解析腳本更新）
 

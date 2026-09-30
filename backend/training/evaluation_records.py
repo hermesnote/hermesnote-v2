@@ -2,76 +2,66 @@
 舊紀錄（只有 `evaluation: {best, last}`）在 API 讀取時用同一套函式即時轉換，不改寫資料庫。
 
 每筆評估紀錄標明比較條件：
-  model_node／head        哪個模型節點、哪個輸出頭（default／regression／direction）
+  model_node／head        哪個模型節點、哪個輸出頭（metric_specs.heads 宣告；單頭為 default）
   dataset                 split（val；未來 holdout／train）、切分方式、Phase、任務資料範圍、樣本數與說明
   point                   評估時點（best／last；未來 checkpoint），對應輪次、權重版本、best 的挑選依據
   metrics                 指標值（鍵＝metrics.py 登記的指標；形狀依定義的 shape）
   unavailable             算不出來的指標與原因
   baselines               適用的簡單基準（方法、數值）
 
-本模組只做資料重組與由混淆矩陣推算 accuracy，不重新計算其他指標；數值與原始報告逐一相同。
+本模組只做資料重組（依指標登記的 shape 與資料契約）與登記的衍生指標推算（例：accuracy 由混淆矩陣
+推算），不重新計算其他指標；數值與原始報告逐一相同。
 """
 
-from training.registry import labeling_rules
-from training.registry import architectures
+from training.registry import architectures, labeling_rules
+from training.registry import metrics as metrics_registry
 
 ROUND_LABEL = {"epoch": "Epoch", "boosting_round": "Boosting 輪次"}
-HEAD_LABEL = {"default": "輸出", "regression": "回歸頭", "direction": "方向頭"}
 SPLIT_LABEL = {"val": "驗證集", "holdout": "Holdout", "train": "訓練集"}
-
-_CLS_SCALARS = ["balanced_accuracy", "macro_f1", "roc_auc", "average_precision"]
-_REG_SCALARS = ["mse", "rmse", "mae", "r2"]
-_BASELINES = {
-    "baseline_majority_class": ("majority_class", "訓練集多數類別", ["accuracy", "balanced_accuracy", "macro_f1"]),
-    "baseline_mean": ("train_mean", "預測訓練集平均", ["mse", "rmse", "mae", "r2"]),
-    "baseline_zero": ("zero", "預測零", ["mse", "rmse", "mae", "r2"]),
-}
-
 
 def _task_type(label_node: dict) -> str | None:
     return labeling_rules.LABELING_RULE_TASK_TYPE.get(label_node.get("labeling_rule", "fixed_threshold"))
 
 
-def _accuracy_from_matrix(matrix) -> float | None:
-    total = sum(sum(row) for row in matrix)
-    return sum(matrix[i][i] for i in range(len(matrix))) / total if total else None
+def _metric_value(key: str, definition: dict, value, report: dict):
+    """依定義的 shape 把報告裡的值轉成資料契約的形狀（見 registry/metrics.py）。"""
+    if definition["shape"] == "matrix":
+        labels = report.get(f"{key}_labels") or list(range(len(value)))
+        axes = definition.get("axes") or {}
+        return {"labels": labels, "values": value, "row_axis": axes.get("row", "列"), "col_axis": axes.get("col", "欄")}
+    return value
 
 
 def _report_to_metrics(report: dict) -> tuple[dict, dict, list]:
-    """單一分類或回歸報告 → (metrics, unavailable, baselines)。"""
+    """單一報告 → (metrics, unavailable, baselines)。不用固定清單：報告裡凡是已登記的指標都納入，
+    形狀依定義的 shape；衍生指標依登記的 derive 推算；`baseline_*` 依 BASELINE_REGISTRY 命名。
+    未登記的鍵不進評估清單（tests 核對 evaluation.py 產生的鍵都已登記）。"""
+    registry = metrics_registry.METRIC_REGISTRY
     metrics, unavailable, baselines = {}, {}, []
-    if "confusion_matrix" in report:
-        matrix = report["confusion_matrix"]
-        labels = report.get("confusion_matrix_labels") or list(range(len(matrix)))
-        metrics["accuracy"] = _accuracy_from_matrix(matrix)
-        for k in _CLS_SCALARS:
-            if k in report:
-                metrics[k] = report[k]
-        metrics["per_class"] = report.get("per_class")
-        metrics["class_distribution"] = report.get("class_distribution")
-        metrics["confusion_matrix"] = {"labels": labels, "values": matrix, "row_axis": "實際", "col_axis": "預測"}
-    else:
-        for k in _REG_SCALARS:
-            if k in report:
-                metrics[k] = report[k]
     for k, v in report.items():
-        if k.endswith("_unavailable_reason"):
-            name = k[: -len("_unavailable_reason")]
-            if name in _BASELINES:
-                continue
-            unavailable[name] = v
-    for raw_key, (key, label, keys) in _BASELINES.items():
-        if raw_key not in report:
+        if k in registry:
+            metrics[k] = _metric_value(k, registry[k], v, report)
+    for k, d in registry.items():
+        derive = d.get("derive")
+        if k not in metrics and derive and report.get(derive["from"]) is not None:
+            metrics[k] = metrics_registry.DERIVATIONS[derive["method"]](report[derive["from"]])
+    for k, v in report.items():
+        if k.endswith("_unavailable_reason") and not k.startswith("baseline_"):
+            unavailable[k[: -len("_unavailable_reason")]] = v
+    for raw_key, b in report.items():
+        if not raw_key.startswith("baseline_") or raw_key.endswith("_unavailable_reason"):
             continue
-        b = report[raw_key]
+        name = raw_key[len("baseline_"):]
+        meta = metrics_registry.BASELINE_REGISTRY.get(raw_key) or {"key": name, "label": name}
         if b is None:
-            baselines.append({"key": key, "label": label, "available": False,
+            baselines.append({"key": meta["key"], "label": meta["label"], "available": False,
                               "reason": report.get(f"{raw_key}_unavailable_reason")})
             continue
-        entry = {"key": key, "label": label, "available": True, "method": b.get("method"),
-                 "metrics": {k: b[k] for k in keys if k in b}}
-        if "class" in b:
-            entry["detail"] = {"class": b["class"]}
+        entry = {"key": meta["key"], "label": meta["label"], "available": True, "method": b.get("method"),
+                 "metrics": {k: v for k, v in b.items() if k in registry}}
+        detail = {k: v for k, v in b.items() if k not in registry and k != "method"}
+        if detail:
+            entry["detail"] = detail
         baselines.append(entry)
     return metrics, unavailable, baselines
 
@@ -117,8 +107,11 @@ def _points(final_metrics: dict, round_unit: str) -> dict:
 
 
 def build_evaluations(node_id: str, raw: dict, *, node: dict, final_metrics: dict, training_meta: dict,
-                      phase, task_range: dict, round_unit: str) -> list[dict]:
-    """`raw`＝訓練回傳的 `{"best": 報告, "last": 報告}`（報告是分類、回歸或雙頭 {direction, regression}）。"""
+                      phase, task_range: dict, specs: dict | None) -> list[dict]:
+    """`raw`＝訓練回傳的 `{"best": 報告, "last": 報告}`。報告若含 metric_specs 宣告的輸出頭鍵（例：雙頭的
+    `direction`／`regression`），逐頭拆成各自一筆；否則整份屬於 `default`。"""
+    heads = {h["key"]: h for h in (specs or {}).get("heads", [])}
+    round_unit = (specs or {}).get("round_unit", "epoch")
     dataset = _dataset(training_meta, node, phase, task_range)
     points = _points(final_metrics, round_unit)
     records = []
@@ -126,14 +119,12 @@ def build_evaluations(node_id: str, raw: dict, *, node: dict, final_metrics: dic
         report = (raw or {}).get(kind)
         if not report:
             continue
-        parts = ([("direction", report["direction"]), ("regression", report["regression"])]
-                 if "direction" in report and "regression" in report else [("default", report)])
-        for head, rep in parts:
+        head_parts = [(h, report[h]) for h in heads if h != "default" and isinstance(report.get(h), dict)]
+        for head, rep in head_parts or [("default", report)]:
             metrics, unavailable, baselines = _report_to_metrics(rep)
             records.append({
                 "id": f"{node_id}/{head}/val/{kind}", "model_node": node_id, "head": head,
-                "head_label": HEAD_LABEL.get(head, head),
-                "task": "classification" if "confusion_matrix" in rep else "regression",
+                "head_label": heads.get(head, {}).get("label", head), "task": heads.get(head, {}).get("task"),
                 "dataset": dataset, "point": points[kind],
                 "metrics": metrics, "unavailable": unavailable, "baselines": baselines,
             })
@@ -156,8 +147,7 @@ def summarize_node(node_id: str, result: dict, graph_spec: dict, phase) -> dict:
         out["evaluations"] = build_evaluations(
             node_id, result["evaluation"], node=node, final_metrics=result.get("final_metrics"),
             training_meta=result.get("training_meta"), phase=phase,
-            task_range={"start": graph_spec.get("start"), "end": graph_spec.get("end")},
-            round_unit=(specs or {}).get("round_unit", "epoch"))
+            task_range={"start": graph_spec.get("start"), "end": graph_spec.get("end")}, specs=specs)
     return out
 
 
@@ -187,6 +177,5 @@ def enrich_job(job: dict) -> dict:
             r["evaluations"] = build_evaluations(
                 node_id, r["evaluation"], node=node, final_metrics=r.get("final_metrics"),
                 training_meta=r.get("training_meta"), phase=job.get("phase"),
-                task_range={"start": spec.get("start"), "end": spec.get("end")},
-                round_unit=(r.get("metric_specs") or {}).get("round_unit", "epoch"))
+                task_range={"start": spec.get("start"), "end": spec.get("end")}, specs=r.get("metric_specs"))
     return job
