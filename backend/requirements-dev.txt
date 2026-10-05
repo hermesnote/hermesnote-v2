@@ -1,0 +1,7 @@
+# 開發／測試依賴（不進正式映像；Dockerfile 只裝 requirements.txt）
+# 安裝：pip install -r requirements-dev.txt
+# 測試：python -m unittest discover -s tests -t .
+-r requirements.txt
+
+# fastapi.testclient（starlette 1.x）需要 httpx2；tests/test_admin_api.py 使用
+httpx2==2.13.1

@@ -12,6 +12,8 @@ import ModelSettings from "./pages/admin/sections/ModelSettings";
 import QuantSettings from "./pages/admin/sections/QuantSettings";
 import TradingSystem from "./pages/admin/sections/TradingSystem";
 import Ledger from "./pages/admin/sections/Ledger";
+import RagKnowledge from "./pages/admin/sections/RagKnowledge";
+import McpService from "./pages/admin/sections/McpService";
 import { AuthProvider } from "./auth/AuthContext";
 import RequireAuth from "./auth/RequireAuth";
 
@@ -42,6 +44,8 @@ export default function App() {
             <Route path="quant" element={<QuantSettings />} />
             <Route path="trading" element={<TradingSystem />} />
             <Route path="ledger" element={<Ledger />} />
+            <Route path="rag" element={<RagKnowledge />} />
+            <Route path="mcp" element={<McpService />} />
           </Route>
         </Routes>
       </BrowserRouter>

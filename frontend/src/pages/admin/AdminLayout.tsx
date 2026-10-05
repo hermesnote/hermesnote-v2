@@ -5,6 +5,9 @@ import { useAuth } from "../../auth/AuthContext";
 import "./AdminLayout.css";
 
 const NAV_ITEMS = [
+  { to: "/admin", label: "Dashboard", end: true },
+  { to: "/admin/rag", label: "知識庫" },
+  { to: "/admin/mcp", label: "MCP 服務" },
   { to: "/admin/trading", label: "交易系統" },
   { to: "/admin/model", label: "模型訓練" },
   { to: "/admin/quant", label: "量化回測" },
@@ -59,6 +62,7 @@ export default function AdminLayout() {
             <NavLink
               key={item.to}
               to={item.to}
+              end={"end" in item ? item.end : undefined}
               className={({ isActive }) => "admin-shell-sidebar-link" + (isActive ? " is-active" : "")}
             >
               {item.label}

@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from indicators.signals import OSCILLATOR_DEFAULTS, is_crossover, is_oscillator, is_pattern
+from routers.admin import router as admin_router
 from routers.auth import router as auth_router
 from routers.indicators import router as indicators_router
 from routers.model_training import router as model_training_router
@@ -28,6 +29,7 @@ app.add_middleware(
 
 
 app.include_router(auth_router)
+app.include_router(admin_router)
 app.include_router(indicators_router)
 app.include_router(strategy_router)
 app.include_router(model_training_router)

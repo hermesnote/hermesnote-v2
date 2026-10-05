@@ -18,6 +18,9 @@ services:
       - "8000:8000"
     env_file:
       - ./backend/.env
+    volumes:
+      # NAS RAG／MCP 服務的設定（含服務 token），唯讀掛載；token 只在後端讀取，不進前端、不進 repo
+      - /mnt/Hermesnote/hermes-agent/services/rag-mcp/mcp-config:/run/secrets/rag-mcp:ro
 
   training:
     container_name: hermesnote-training
