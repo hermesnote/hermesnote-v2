@@ -27,7 +27,7 @@ export default function App() {
             <Route path="/quant" element={<QuantBacktestPage />} />
             <Route path="/model" element={<ModelTrainingPage />} />
             <Route path="/hermes" element={<HermesResumePage />} />
-            <Route path="/20260930" element={<Meeting20260930Page />} />
+            <Route path="/20261014" element={<Meeting20260930Page />} />
           </Route>
 
           <Route path="/admin/login" element={<LoginPage />} />

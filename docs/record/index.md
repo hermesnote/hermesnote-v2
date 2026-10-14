@@ -4,6 +4,7 @@
 
 | 日期 | 摘要 | 詳細 |
 |------|------|------|
+| 2026-10-14 | **研究進度簡報更新並改路由為 /20261014，已部署**：`output` 定稿（第 4 頁新增文獻表）重新原樣複製到 `public/meeting-2026-09-30-slides.html`；路由 `/20260930` 改為 `/20261014`，不保留舊網址；正式站檔案 md5 與 public 相同、4 頁與文獻表皆確認 | [archive/2026-10-14-meeting-slides-update.md](archive/2026-10-14-meeting-slides-update.md) |
 | 2026-10-05（續） | **後台 Dashboard＋知識庫＋MCP 服務頁第一版，已部署並完成正式驗收（版面待 Hermes 登入確認）**：`/admin` 工作總覽（模型／回測／知識庫索引 provider；HA、SDK 標「尚未接入」；查不到的來源標「無法確認」且不計入統計）；`/admin/rag` 總覽、文件、片段、搜尋回查、索引工作；`/admin/mcp` 狀態、4 個工具、協定連線測試；後端提供限管理員的固定路徑代理，token 由唯讀掛載的 NAS 設定檔讀取、不進前端；11 項新測試＋既有 201 項通過 | [archive/2026-10-05-admin-dashboard-rag-mcp.md](archive/2026-10-05-admin-dashboard-rag-mcp.md) |
 | 2026-09-30（續） | **研究進度簡報 /20260930 上線**：定稿 HTML 原樣放入 `public/`，比照 `/hermes` 以 iframe（`?embedded=1`）嵌入並沿用網站導覽列，簡報依導覽列下方空間縮放；正式網址直接開啟、重新整理、四頁無裁切、換頁皆確認 | [archive/2026-09-30-meeting-slides-route.md](archive/2026-09-30-meeting-slides-route.md) |
 | 2026-09-30 | **通用指標視覺化，已部署（2026-09-30，`92b4a24`＋`39d5114`）**：指標定義改為可共用登記表（`registry/metrics.py`），模型以 `metric_specs` 引用；評估改為 `evaluations` 清單（標明模型節點、輸出頭、資料集與切分、任務資料範圍、樣本數、評估時點與挑選依據、基準）；前後台共用 `components/metrics/`（逐輪曲線＋best 標記＋基準線、數值比較、逐類別、分布、混淆矩陣熱圖）；舊紀錄 `evaluation.best／last` 讀取時轉換、不改寫資料庫（正式 3 筆 138 個數值逐一相同）；新任務只存新格式；api.md 補 HA 改讀對照與範例。198 項測試過、harness ALL MATCH、實際畫面確認 | [archive/2026-09-30-generic-metric-visualization.md](archive/2026-09-30-generic-metric-visualization.md) |
