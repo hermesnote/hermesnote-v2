@@ -118,22 +118,28 @@ def _topo_order(nodes: dict) -> list[str]:
 
 
 def _ensure_time_indexed(df: "pd.DataFrame") -> "pd.DataFrame":
-    """確保 df 有排序好、去重的 DatetimeIndex，當作這個時間框架的『真實時間戳』基準。
-    同一根K棒可能因為資料管線重跑被寫入多次，這裡保留每個時間點最後一筆
-    （跟 services/backtest_demo.py 的 prepare_ohlcv 同一套處理，訓練這邊之前沒有做）。
+    """確保 df 有排序好、時間唯一的 DatetimeIndex，當作這個時間框架的『真實時間戳』基準。
+
+    流程版本 2026-11-r1 起，重複時間一律報錯並列出明細，不再靜默保留最後一筆：舊做法在
+    built_at 相同時保留哪一筆不確定，研究期間曾因此可能把 30m／60m 的日盤 K 棒換成 13:45 那根
+    session='other' 的零星成交（讀取端已排除 other，見 services/quotes.py）。
 
     本機測試用的假資料如果沒有 datetime 欄位/索引，就退化成用原本的 RangeIndex——
     這種情況沒有真實時間戳可用，只能靠位置對齊，等於維持舊行為，僅供輕量測試。
     """
     if isinstance(df.index, pd.DatetimeIndex):
-        return df[~df.index.duplicated(keep="last")].sort_index()
-    if "datetime" in df.columns:
+        d = df
+    elif "datetime" in df.columns:
         d = df.copy()
         d["datetime"] = pd.to_datetime(d["datetime"])
         d = d.set_index("datetime")
-        d = d[~d.index.duplicated(keep="last")]
-        return d.sort_index()
-    return df
+    else:
+        return df
+    if d.index.has_duplicates:
+        from services.quotes import QuoteIntegrityError, duplicate_details
+
+        raise QuoteIntegrityError("行情資料有重複時間，無法決定使用哪一筆：" + "；".join(duplicate_details(d.index, "datetime")))
+    return d.sort_index()
 
 
 PREVIEW_THROTTLE_SEC = 1.5  # 即時視窗預覽最多每這麼多秒送一筆，不是每個 batch/每個 epoch 都送

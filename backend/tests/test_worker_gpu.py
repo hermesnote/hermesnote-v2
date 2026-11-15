@@ -84,7 +84,7 @@ class SequentialJobsTests(unittest.TestCase):
 
         release = mock.MagicMock(wraps=worker.release_gpu_memory)
         with mock.patch.object(worker.job_store, "fetch_next_pending", fetch_next_pending), \
-                mock.patch.object(worker.job_store, "mark_running", lambda j, d: mark("running", j)), \
+                mock.patch.object(worker.job_store, "mark_running", lambda j, d, *a: mark("running", j)), mock.patch.object(worker.job_store, "save_data_report", lambda j, r: mark("report", j)), \
                 mock.patch.object(worker.job_store, "mark_done", lambda j, r: mark("done", j)), \
                 mock.patch.object(worker.job_store, "mark_failed", lambda j, e: mark(f"failed:{e}", j)), \
                 mock.patch.object(worker, "_load_dataframes", load_dataframes), \
@@ -97,7 +97,7 @@ class SequentialJobsTests(unittest.TestCase):
             with self.assertRaises(_Stop):
                 asyncio.run(worker.main_loop())
 
-        self.assertEqual([e for e in events if e[0] != "artifacts"],
+        self.assertEqual([e for e in events if e[0] not in ("artifacts", "report")],
                          [("running", "job-1"), ("done", "job-1"), ("running", "job-2"), ("done", "job-2")])
         self.assertEqual([e[1] for e in events if e[0] == "artifacts"], ["job-1", "job-2"])
         # 每筆：開始前判斷顯存時釋放一次＋結束後釋放一次
@@ -122,7 +122,7 @@ class SequentialJobsTests(unittest.TestCase):
             return {"tx_1m": H.data_loader("tx_1m")}
 
         with mock.patch.object(worker.job_store, "fetch_next_pending", fetch_next_pending), \
-                mock.patch.object(worker.job_store, "mark_running", lambda j, d: mark("running", j)), \
+                mock.patch.object(worker.job_store, "mark_running", lambda j, d, *a: mark("running", j)), mock.patch.object(worker.job_store, "save_data_report", lambda j, r: mark("report", j)), \
                 mock.patch.object(worker.job_store, "mark_done", lambda j, r: mark("done", j)), \
                 mock.patch.object(worker.job_store, "mark_failed", lambda j, e: mark("failed", j)), \
                 mock.patch.object(worker, "_load_dataframes", load_dataframes), \
@@ -132,7 +132,8 @@ class SequentialJobsTests(unittest.TestCase):
                 mock.patch.object(worker, "query_gpu_memory", return_value=INCIDENT):
             with self.assertRaises(_Stop):
                 asyncio.run(worker.main_loop())
-        self.assertEqual(events, [("running", "bad"), ("failed", "bad"), ("running", "good"), ("done", "good")])
+        # 驗證失敗的任務在讀資料前就失敗，不會寫讀取報告；合法任務讀完資料、訓練前寫入
+        self.assertEqual(events, [("running", "bad"), ("failed", "bad"), ("running", "good"), ("report", "good"), ("done", "good")])
 
 
 if __name__ == "__main__":

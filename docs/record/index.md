@@ -4,6 +4,7 @@
 
 | 日期 | 摘要 | 詳細 |
 |------|------|------|
+| 2026-11-15 | **M1 讀取修正與資料紀錄，已遷移並部署（2026-11-15）**：訓練讀取排除 `session='other'`、依 `bar_start_ts` 排序並驗證唯一（重複報錯，不再靜默保留最後一筆）；讀取報告（排除筆數與日期、rule_version 分布、缺格數）、流程版本 `2026-11-r1`、環境指紋、2026 年期間提示寫進任務紀錄並在前後台顯示；跨時間框架的圖在 M4 前暫時拒絕；Dockerfile 移除未使用的 TA-Lib 0.4.0。231 項測試、harness ALL MATCH、正式 quotes 唯讀核對通過；實測影響超出那 5 天（主要是 OBV 累積偏移延續到期末），並確認舊讀取曾在 2016-01-30 的 30m／60m 丟掉真正的日盤 K 棒 | [archive/2026-11-15-m1-read-rules-provenance.md](archive/2026-11-15-m1-read-rules-provenance.md) |
 | 2026-10-14 | **研究進度簡報更新並改路由為 /20261014，已部署**：`output` 定稿（第 4 頁新增文獻表）重新原樣複製到 `public/meeting-2026-09-30-slides.html`；路由 `/20260930` 改為 `/20261014`，不保留舊網址；正式站檔案 md5 與 public 相同、4 頁與文獻表皆確認 | [archive/2026-10-14-meeting-slides-update.md](archive/2026-10-14-meeting-slides-update.md) |
 | 2026-10-05（續） | **後台 Dashboard＋知識庫＋MCP 服務頁第一版，已部署並完成正式驗收（版面待 Hermes 登入確認）**：`/admin` 工作總覽（模型／回測／知識庫索引 provider；HA、SDK 標「尚未接入」；查不到的來源標「無法確認」且不計入統計）；`/admin/rag` 總覽、文件、片段、搜尋回查、索引工作；`/admin/mcp` 狀態、4 個工具、協定連線測試；後端提供限管理員的固定路徑代理，token 由唯讀掛載的 NAS 設定檔讀取、不進前端；11 項新測試＋既有 201 項通過 | [archive/2026-10-05-admin-dashboard-rag-mcp.md](archive/2026-10-05-admin-dashboard-rag-mcp.md) |
 | 2026-09-30（續） | **研究進度簡報 /20260930 上線**：定稿 HTML 原樣放入 `public/`，比照 `/hermes` 以 iframe（`?embedded=1`）嵌入並沿用網站導覽列，簡報依導覽列下方空間縮放；正式網址直接開啟、重新整理、四頁無裁切、換頁皆確認 | [archive/2026-09-30-meeting-slides-route.md](archive/2026-09-30-meeting-slides-route.md) |

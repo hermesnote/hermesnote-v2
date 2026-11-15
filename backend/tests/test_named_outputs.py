@@ -513,7 +513,7 @@ class EntryPointTests(unittest.TestCase):
         self.created: list = []
         self._orig = (job_store.create_job, job_store.get_job)
 
-        async def fake_create(graph_spec, job_type="train", phase=None, parent_job_id=None):
+        async def fake_create(graph_spec, job_type="train", phase=None, parent_job_id=None, warnings=None):
             self.created.append({"spec": graph_spec, "phase": phase, "parent": parent_job_id})
             return "fake-job-id"
 
@@ -533,7 +533,7 @@ class EntryPointTests(unittest.TestCase):
     def test_api_accepts_legal_named_graph(self):
         spec = graph(dual(), down([ref("up", "regression"), ref("up", "direction_probability")]))
         out = self._train(start=spec["start"], end=spec["end"], nodes=spec["nodes"])
-        self.assertEqual(out, {"job_id": "fake-job-id"})
+        self.assertEqual(out, {"job_id": "fake-job-id", "warnings": []})
         self.assertEqual(len(self.created), 1)
 
     def test_api_rejects_illegal_graphs_without_creating_job(self):
@@ -558,7 +558,7 @@ class EntryPointTests(unittest.TestCase):
         good = graph(dual(), down([ref("up", "direction_probability"), "fa"]))
         self.parents["p1"] = {"phase": 1, "status": "done", "graph_spec": good}
         out = self._train(start="", end="", nodes=[], phase=2, parent_job_id="p1")
-        self.assertEqual(out, {"job_id": "fake-job-id"})
+        self.assertEqual(out, {"job_id": "fake-job-id", "warnings": []})
         inherited = self.created[-1]["spec"]
         self.assertEqual(next(n for n in inherited["nodes"] if n["id"] == "down")["inputs"][0], ref("up", "direction_probability"))
 

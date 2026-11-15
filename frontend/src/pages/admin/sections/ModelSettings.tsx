@@ -98,8 +98,14 @@ function groupArchitecturesByFamily(list: RegistryEntry[]): [string, RegistryEnt
   return [...groups.entries()];
 }
 
+// 任務提示（後端 training/provenance.py）：例如期間超過研究資料上限——只提示、不擋任務
+type JobWarning = { code: string; message: string };
+
 type JobSummary = {
   job_id: string;
+  /** 流程版本；null＝2026-11-r1 以前的舊任務（保留、不重算，不和新版本互相比較） */
+  pipeline_version?: string | null;
+  warnings?: JobWarning[];
   graph_spec: { start: string; end: string; nodes: Record<string, unknown>[] };
   status: "pending" | "running" | "done" | "failed";
   error: string | null;
@@ -231,6 +237,9 @@ export default function ModelSettings() {
 
   const [runningJobId, setRunningJobId] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState("");
+  // 送出成功但有提示（例如選到 2026 年以後的期間）：任務照常建立，提示同時寫進任務紀錄
+  const [submitNotice, setSubmitNotice] = useState<string[]>([]);
+  const noticeFrom = (json: { warnings?: JobWarning[] }) => setSubmitNotice((json.warnings ?? []).map((w) => w.message));
   const [history, setHistory] = useState<JobSummary[]>([]);
   const [artifacts, setArtifacts] = useState<ArtifactSummary[]>([]);
   const [inferTarget, setInferTarget] = useState<{ jobId: string; nodeId?: string; isPhase3?: boolean } | null>(null);
@@ -348,6 +357,7 @@ export default function ModelSettings() {
     })
       .then(async (res) => {
         if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || "推論任務建立失敗");
+        noticeFrom(await res.json().catch(() => ({})));
         setInferTarget(null);
         refreshHistory();
       })
@@ -478,6 +488,7 @@ export default function ModelSettings() {
   function handleSubmit() {
     if (!canSubmit) return;
     setSubmitError("");
+    setSubmitNotice([]);
     const graphSpec = buildGraphSpec();
 
     fetch(`${API_BASE}/api/model/train`, {
@@ -492,7 +503,8 @@ export default function ModelSettings() {
         if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `送出失敗（${res.status}）`);
         return res.json();
       })
-      .then((json: { job_id: string }) => {
+      .then((json: { job_id: string; warnings?: JobWarning[] }) => {
+        noticeFrom(json);
         setRunningJobId(json.job_id);
         refreshHistory();
       })
@@ -508,6 +520,7 @@ export default function ModelSettings() {
     })
       .then(async (res) => {
         if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || "建立 Phase 2 任務失敗");
+        noticeFrom(await res.json().catch(() => ({})));
         refreshHistory();
       })
       .catch((e) => setSubmitError(e.message || "建立 Phase 2 任務失敗"));
@@ -542,6 +555,7 @@ export default function ModelSettings() {
     fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
       .then(async (res) => {
         if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || "重跑失敗");
+        noticeFrom(await res.json().catch(() => ({})));
         refreshHistory();
       })
       .catch((e) => setSubmitError(e.message || "重跑失敗"));
@@ -611,6 +625,7 @@ export default function ModelSettings() {
               </div>
             )}
             {submitError && <div className="model-settings-submit-msg is-error">{submitError}</div>}
+            {submitNotice.map((m) => <div key={m} className="model-settings-submit-msg is-warning">已建立任務，提示：{m}</div>)}
           </div>
         </div>
       </div>
@@ -640,7 +655,11 @@ export default function ModelSettings() {
                   </div>
                   <div className="model-settings-history-config">
                     {job.graph_spec.start} ~ {job.graph_spec.end}　device: {job.device ?? "—"}
+                    　流程版本：{job.pipeline_version ?? "舊版（2026-11 以前）"}
                   </div>
+                  {(job.warnings ?? []).map((w) => (
+                    <div key={w.code} className="model-settings-history-warning">提示：{w.message}</div>
+                  ))}
                   {job.error && <div className="model-settings-history-error">{job.error}</div>}
                 </div>
 

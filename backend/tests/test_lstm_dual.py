@@ -180,7 +180,7 @@ class DescribeAndSubmitTests(unittest.TestCase):
 
         created = []
 
-        async def fake_create(spec, job_type="train", phase=None, parent_job_id=None):
+        async def fake_create(spec, job_type="train", phase=None, parent_job_id=None, warnings=None):
             created.append(spec)
             return "job-1"
 
@@ -189,7 +189,7 @@ class DescribeAndSubmitTests(unittest.TestCase):
         try:
             good = graph_spec()
             out = asyncio.run(router.start_training(router.TrainRequest(start=good["start"], end=good["end"], nodes=good["nodes"])))
-            self.assertEqual(out, {"job_id": "job-1"})
+            self.assertEqual(out, {"job_id": "job-1", "warnings": []})
             p = params(); del p["seed"]
             bad = graph_spec(p)
             with self.assertRaises(HTTPException) as cm:

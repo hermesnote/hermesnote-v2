@@ -23,20 +23,9 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# TA-Lib 的 Python 套件只是綁定，底層這顆 C library 要自己編譯裝（跟 web 容器的 Dockerfile 一致）
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential wget \
-    && wget https://github.com/ta-lib/ta-lib/releases/download/v0.4.0/ta-lib-0.4.0-src.tar.gz \
-    && tar -xzf ta-lib-0.4.0-src.tar.gz \
-    && cd ta-lib \
-    && ./configure --prefix=/usr \
-    && make \
-    && make install \
-    && cd .. \
-    && rm -rf ta-lib ta-lib-0.4.0-src.tar.gz \
-    && apt-get purge -y wget \
-    && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
+# TA-Lib：PyPI 的 TA-Lib==0.7.1 wheel 已內附 C 函式庫（ta_lib.libs/libta-lib-*.so.0.7.1，2026-11 以 ldd
+# 在 NAS 容器核對過）。以前在這裡另外編譯的 0.4.0 從來沒被載入，2026-11（M1）移除（跟 web 容器一致）；
+# 環境指紋（training/provenance.py）會記錄實際載入的 talib_c 版本。
 
 # 只裝 CPU 版以外的 torch（GPU 版），獨立一層方便 Docker cache
 RUN pip install --no-cache-dir torch==2.10.0 --index-url https://download.pytorch.org/whl/cu128

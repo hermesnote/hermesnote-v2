@@ -135,3 +135,10 @@ ALTER TABLE model_artifacts ADD COLUMN IF NOT EXISTS weights_last BYTEA;
 -- （2026-09-23 週日 scrub 維護閘門的 model_training_checkpoints 建表語句已隨功能撤回移除
 --  ——那個遷移同樣從未套用過正式庫，撤回範圍內的東西不留在 schema 定義檔裡，見
 --  docs/record/archive/2026-09-23-scrub-withdrawal-and-lstm-custom.md。）
+
+-- 2026-11-15（M1：流程版本與資料紀錄）新增的欄位，語意見 migrations/2026-11-15_m1_pipeline_provenance.sql
+-- （新版 web／training 會讀寫這四欄，部署前必須先套用）。
+ALTER TABLE model_training_jobs ADD COLUMN IF NOT EXISTS pipeline_version TEXT;
+ALTER TABLE model_training_jobs ADD COLUMN IF NOT EXISTS warnings JSONB;
+ALTER TABLE model_training_jobs ADD COLUMN IF NOT EXISTS env_fingerprint JSONB;
+ALTER TABLE model_training_jobs ADD COLUMN IF NOT EXISTS data_report JSONB;

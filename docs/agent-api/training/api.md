@@ -4,6 +4,31 @@
 >
 > 這裡只保證**格式跟現在程式碼一致**，不代表已經做到論文等級的嚴謹（見文末「已知限制」）。新增模型／元件的方法見 [extending.md](extending.md)。
 
+## 版本與變更（MCP 同步用）
+
+每筆任務都記錄 `pipeline_version`（流程版本）。會改變結果的修正都會升一版；**不同流程版本的結果不互相比較**。舊任務（`pipeline_version: null`）保留、不重算。
+
+| 流程版本 | 部署日 | 對 API 呼叫端的變化 |
+|---|---|---|
+| `null`（舊） | 2026-11 以前 | — |
+| `2026-11-r1`（M1） | 2026-11-15 | ① `POST /train`、`POST /infer` 回應多 `warnings`；② `GET /jobs`、`GET /jobs/{id}` 多 `pipeline_version`、`warnings`，單筆另有 `data_report`、`env_fingerprint`；③ 跨時間框架的圖回 400（M4 前暫不開放）；④ 讀到重複 K 棒時任務 `failed`（不再靜默去重）；⑤ 分鐘資料讀取排除 `session='other'` |
+
+後續里程碑（M2 暖機與樣本框架、M3 Phase 3 評估與逐筆紀錄、M4 跨時間框架對齊、M5 串接防洩漏、M6 多分支、M7 前端）上線時，會在這張表加一列並更新下方對應章節。**MCP 端請以這張表判斷要同步哪些欄位**；欄位的即時定義仍以 `GET /api/model/registry/*` 與實際回應為準。
+
+### 錯誤與失敗（呼叫端怎麼判斷）
+
+| 情況 | 形式 | 內容 |
+|---|---|---|
+| 圖不合法（含跨時間框架、參數、引用、成環） | HTTP 400，**不建立任務** | `detail`：全部問題以「；」串成一行 |
+| 請求格式不對（缺欄位、型別錯） | HTTP 422 | FastAPI 標準驗證錯誤 |
+| Phase 血緣不合法（母任務不存在／不是對應 Phase／未完成；Phase 3 期間與訓練重疊） | HTTP 400 | `detail` 說明原因 |
+| 推論找不到任務或模型產物 | HTTP 404 | — |
+| 刪除仍有後續 Phase 任務的紀錄 | HTTP 409 | — |
+| 期間超過研究資料上限（迄日晚於 `2026-01-01`） | HTTP 200，**任務照常建立** | 回應 `warnings: [{"code": "period_after_research_end", "message": "..."}]`，同時寫進任務紀錄 |
+| 該期間查無資料 | 任務 `status: "failed"` | `error`：`這段期間查無資料` |
+| 行情有重複 K 棒 | 任務 `status: "failed"` | `error`：`market.future_taifex_tx_… 在 … 有重複 K 棒（已排除 session='other'）：bar_start_ts=… 出現 2 次；…`（最多列 20 筆）。研究期間（2026 年以前）實測沒有重複；2026 年資料有已知的重複夜盤 |
+| 驗證通過但執行時失敗（例如 OOM 以外的例外） | 任務 `status: "failed"` | `error` 是例外訊息 |
+
 ## 流程總覽（訓練）
 
 1. `GET /api/model/registry/{features,outcomes,labeling_rules,architectures,metrics}` 與 `GET /api/model/registry/components/{attention,optimizer}` → 查目前登記的可用選項、每個模型與元件的參數 schema（永遠用這幾支查即時清單，不要背下面範例裡的值）
@@ -55,7 +80,21 @@
 
 `start`/`end`/`nodes` 只要型別對（字串／字串／陣列）就會通過驗證，實際值不影響結果——後端在 `phase==2` 分支裡完全不會讀這三個欄位。
 
-**回應：** `{ "job_id": "..." }`
+**回應（`2026-11-r1` 起）：**
+
+```json
+{ "job_id": "...", "warnings": [] }
+```
+
+期間迄日晚於 `2026-01-01` 時（只提示、任務照常建立；Phase 2 依繼承來的期間判斷）：
+
+```json
+{ "job_id": "...", "warnings": [{ "code": "period_after_research_end",
+  "message": "期間迄日 2026-03-01 超過研究資料上限 2026-01-01：2026 年起的行情來自新匯入管線，重複夜盤、1～4 月缺口與時段定義尚未核對，結果請另外標示。" }] }
+```
+
+**跨時間框架（`2026-11-r1` 起暫不開放，M4 完成後開放）**：同一個 Model Node 的 Feature 輸入、上游模型鏈與 Label 只要用到兩個以上 `timeframe`，回 400：
+`Model 節點 m：輸入與 Label 用到多個時間框架 ['tx_15m', 'tx_60m']；跨時間框架對齊（依 bar_start_ts 對齊、依 bar_end_ts 判定可用）完成前暫不開放`。
 
 ### 節點格式（`nodes` 陣列裡的三種節點）
 
@@ -499,7 +538,7 @@ cm = pick(r, "default", "best")["metrics"]["confusion_matrix"]["values"]
 
 ## `GET /api/model/jobs?limit=20`
 
-列出最近的任務（新到舊）。
+列出最近的任務（新到舊）。每筆含 `pipeline_version`、`warnings`（不含 `data_report`／`env_fingerprint` 全文，要看請查單筆）。
 
 ## `GET /api/model/jobs/{job_id}`
 
@@ -509,9 +548,42 @@ cm = pick(r, "default", "best")["metrics"]["confusion_matrix"]["values"]
   "metric_specs": { "model1": {...} },
   "result": { "model1": { "final_metrics": {...}, "evaluations": [...], "metric_specs": {...}, "output_specs": {...},
                           "device": "cuda", "training_meta": {...} } },
-  "device": "cuda", "job_type": "train", "phase": 1, "parent_job_id": null, "created_at": "..."
+  "device": "cuda", "job_type": "train", "phase": 1, "parent_job_id": null, "created_at": "...",
+  "started_at": "...", "finished_at": "...",
+  "pipeline_version": "2026-11-r1",
+  "warnings": [],
+  "env_fingerprint": { "pipeline_version": "2026-11-r1", "python": "3.12.x", "numpy": "...", "pandas": "...",
+                       "torch": "2.10.0+cu128", "cuda": "12.8", "gpu": "NVIDIA GeForce RTX 5060 Ti",
+                       "xgboost": "3.2.0", "sklearn": "1.9.0", "talib": "0.7.1", "talib_c": "0.7.1 (...)" },
+  "data_report": {
+    "pipeline_version": "2026-11-r1",
+    "period": { "start": "2011-01-03", "end": "2025-01-01" },
+    "research_data_end": "2026-01-01",
+    "warnings": [],
+    "available_time": { "source": "bar_end_ts", "publication_delay_sec": 0, "delay_status": "assumed" },
+    "timeframes": {
+      "tx_1m": { "table": "market.future_taifex_tx_1m", "start": "2011-01-03", "end": "2025-01-01",
+                 "n_rows": 2544388, "order_key": "bar_start_ts",
+                 "excluded_sessions": ["other"], "n_excluded": 5,
+                 "excluded_trading_days": ["2012-03-03", "2012-12-22", "2014-12-27", "2016-01-30", "2016-09-10"],
+                 "sessions": { "day": 1026183, "night": 1518205 },
+                 "rule_versions": { "taifex_front_outright_v1_2026-04-30": 2537283,
+                                    "taifex_front_outright_v1_tick_precise_2026-08-09": 7105 },
+                 "n_gaps": 33262, "n_missing_bars": 44823,
+                 "first_datetime": "2011-01-03 08:45:00", "last_datetime": "2024-12-31 23:59:03" }
+    }
+  }
 }
 ```
+
+**資料紀錄欄位（`2026-11-r1` 起；舊任務都是 `null`／空）：**
+
+| 欄位 | 何時寫入 | 說明 |
+|---|---|---|
+| `pipeline_version` | 建立時（web）；開始執行時以 worker 的版本覆寫 | 流程版本，見「版本與變更」 |
+| `warnings` | 建立時；讀完資料後以 `data_report.warnings` 為準 | 只提示、不擋任務 |
+| `env_fingerprint` | 開始執行時 | 實際執行環境的套件／CUDA／GPU／TA-Lib C 版本 |
+| `data_report` | 讀完資料、訓練開始前（訓練失敗的任務也查得到） | 每個時間框架讀到什麼、排除了什麼。`n_excluded`：排除的 `session='other'` 列數；`n_gaps`：同一交易日同一時段內相鄰 K 棒間隔超過一個週期的次數；`n_missing_bars`：缺的 K 棒總數（**只統計，不補棒，也不擋訓練**）；日線表沒有 `n_gaps`；`available_time`：目前的資訊可用時間假設（發布延遲 0 秒為未實測假設） |
 
 `status`：`pending`／`running`／`done`／`failed`（看 `error`）。worker 同時間只跑一筆；`pending` 表示還在排隊，或 GPU 實際可用顯存不足預留量（`TRAINING_GPU_MIN_FREE_MB`，預設 4096MiB，已先釋放 worker 自己的快取才判斷）而每 30 秒重試——延後原因（total／used／free、worker 自身佔用、門檻）記在 training 容器 log（`docker logs hermesnote-training`），API 不回傳。`result` 的 key 是每個 Model Node 的 `id`；`job_type='infer'` 的 job，`result[node_id]` 改成 `{"count": N, "start_ts": unix秒, "end_ts": unix秒}`（推論結果本身不在這裡，見下方 `/inference_predictions`）。
 
@@ -562,7 +634,15 @@ cm = pick(r, "default", "best")["metrics"]["confusion_matrix"]["values"]
 | `phase` | `null`（一般推論）或 `3`（Phase 3 holdout，`target_job_id` 必須是一筆已完成的 Phase 2 job，且 `start` 必須晚於該 Phase 1/2 訓練期間的 `end`，不然會回 400——holdout 不能跟訓練資料重疊） |
 | `use_weights` | `"best"`（預設）或 `"last"`：載入哪一組權重（見「讀取訓練結果」）；infer job 的 `graph_spec` 與 `result` 都會記錄這個值 |
 
-**回應：** `{ "job_id": "..." }`——一樣是非同步 job，用 `GET /api/model/jobs/{job_id}` 輪詢，`status='done'` 後結果已經分批存進 DB，用下面這支查。
+**回應：** `{ "job_id": "...", "warnings": [] }`（`warnings` 規則同 `/train`，依推論期間判斷）——一樣是非同步 job，用 `GET /api/model/jobs/{job_id}` 輪詢，`status='done'` 後結果已經分批存進 DB，用下面這支查。
+
+**Phase 3 範例**（`target_job_id` 是已完成的 Phase 2；`start` 必須晚於 Phase 1/2 的 `end`）：
+
+```json
+{ "target_job_id": "<Phase 2 job_id>", "start": "2025-01-02", "end": "2026-01-01", "phase": 3, "use_weights": "best" }
+```
+
+回應 `{ "job_id": "...", "warnings": [] }`；建立的任務 `job_type: "infer"`、`phase: 3`、`parent_job_id` 為該 Phase 2。目前 Phase 3 只產生逐列推論結果（下一支）；**對答案與評估指標（Phase 3 評估、逐筆結果）在 M3 上線**，屆時本節會補上評估結果格式。
 
 ## `GET /api/model/jobs/{job_id}/inference_predictions?node_id=...&start=...&end=...&cursor=...&limit=1000`
 
@@ -599,7 +679,7 @@ cm = pick(r, "default", "best")["metrics"]["confusion_matrix"]["values"]
 
 ## 已知限制（截至這份文件更新時的程式碼狀態）
 
-- **正規化**已接（train-only fit 的 MinMax），但**跨時間框架融合**（例如 15m 模型接 1h 模型）還沒做重採樣對齊，時間戳交集在兩邊尺度完全不同時會直接交集出空集合報錯。
+- **正規化**已接（train-only fit 的 MinMax）。**跨時間框架**（例如 15m 模型接 1h 模型、或 Feature 與 Label 不同時間框架）自 `2026-11-r1` 起提交時直接回 400，M4（依 `bar_start_ts` 對齊、依 `bar_end_ts`＋延遲判定可用、可設定沿用前一時段與過舊上限）完成後開放。
 - 上游 Model Node 接下游時，上游對自己訓練用的「全範圍」窗格是用同一個已 fit 過的模型直接預測（不是 OOF/out-of-fold），下游等於看到上游對 train 段的過擬合結果——這是已知的資料洩漏風險，尚未處理；具名輸出不改變這一點。
 - 推論時欄位順序依 `inputs` 的原始順序（與訓練相同）。**具名輸出修正部署之前的推論實作是「先全部 Feature、再接上游模型」**，只有 `inputs` 剛好是這個排列時才跟訓練對得上；如果有把模型排在特徵前面或夾在中間的舊產物，推論結果可能錯位，需重新訓練。管理後台產生的圖一律特徵在前，不受影響。
 - 進階 `labeling_rule`（波動度門檻、分位數切分、成本導向、triple barrier）還沒做，目前只有 `fixed_threshold`（分類）跟 `identity`（回歸）。

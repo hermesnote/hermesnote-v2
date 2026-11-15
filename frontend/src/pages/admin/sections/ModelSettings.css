@@ -693,3 +693,12 @@
   flex-direction: column;
   gap: 4px;
 }
+
+/* 任務提示（只提示、不擋）：例如期間超過研究資料上限 */
+.model-settings-submit-msg.is-warning,
+.model-settings-history-warning {
+  color: var(--status-amber);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  margin-top: 4px;
+}

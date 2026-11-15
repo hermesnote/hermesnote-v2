@@ -72,8 +72,30 @@ type JobResultEntry = {
 type TrainGraphSpec = { start: string; end: string; nodes: AnyNode[] };
 type InferGraphSpec = { target_job_id: string; target_node_id: string; start: string; end: string };
 
+// 讀取報告（後端 services/quotes.py → training/provenance.py）：每個時間框架讀到什麼、排除了什麼
+type ReadReport = {
+  table: string; n_rows: number; order_key: string;
+  excluded_sessions: string[]; n_excluded: number; excluded_trading_days: string[];
+  sessions?: Record<string, number>; rule_versions?: Record<string, number>;
+  n_gaps?: number; n_missing_bars?: number; first_datetime?: string; last_datetime?: string;
+};
+type JobWarning = { code: string; message: string };
+type DataReport = {
+  pipeline_version: string;
+  period: { start: string; end: string };
+  research_data_end: string;
+  warnings: JobWarning[];
+  available_time: { source: string; publication_delay_sec: number; delay_status: string };
+  timeframes: Record<string, ReadReport | null>;
+};
+
 type JobDetail = {
   job_id: string;
+  /** 流程版本；null＝2026-11-r1 以前的舊任務（保留、不重算，不和新版本互相比較） */
+  pipeline_version?: string | null;
+  warnings?: JobWarning[];
+  data_report?: DataReport | null;
+  env_fingerprint?: Record<string, string | number | null> | null;
   job_type: "train" | "infer";
   graph_spec: TrainGraphSpec | InferGraphSpec;
   status: "pending" | "running" | "done" | "failed";
@@ -88,6 +110,57 @@ type JobDetail = {
 // 最終模型推論的逐列結果（job_type='infer'）——跟 WindowPreview（訓練途中的抽樣展示）
 // 是完全不同性質的資料，這裡沒有 bars／actual，只有模型真正的推論輸出，量級可以到百萬列，
 // 一律依游標分頁載入，不整段抓。
+const FINGERPRINT_KEYS = ["python", "numpy", "pandas", "torch", "cuda", "gpu", "xgboost", "sklearn", "talib", "talib_c"];
+
+// 資料紀錄：流程版本、期間提示、各時間框架的讀取報告、可用時間假設、執行環境。舊任務沒有這些紀錄。
+function DataRecordSection({ job }: { job: JobDetail }) {
+  const report = job.data_report;
+  return (
+    <div className="model-left-section">
+      <div className="model-left-title">資料紀錄</div>
+      <div className="model-info-row"><span>流程版本</span><strong>{job.pipeline_version ?? "舊版（2026-11 以前，無讀取紀錄）"}</strong></div>
+      {(job.warnings ?? []).map((w) => (
+        <div key={w.code} className="model-info-warning">提示：{w.message}</div>
+      ))}
+      {report && (
+        <>
+          <div className="model-info-row"><span>可用時間</span><strong>
+            {report.available_time.source}＋發布延遲 {report.available_time.publication_delay_sec} 秒
+            {report.available_time.delay_status === "assumed" ? "（未實測假設）" : ""}
+          </strong></div>
+          {Object.entries(report.timeframes).map(([tf, r]) => r && (
+            <details className="model-params-detail" key={tf}>
+              <summary>{tf}：{r.n_rows.toLocaleString()} 根，排除 {r.n_excluded} 根{r.n_missing_bars !== undefined ? "，缺 " + r.n_missing_bars.toLocaleString() + " 根" : ""}</summary>
+              <div className="model-info-row"><span>資料表</span><strong>{r.table}</strong></div>
+              <div className="model-info-row"><span>排序／唯一鍵</span><strong>{r.order_key}</strong></div>
+              <div className="model-info-row"><span>排除時段</span><strong>{r.excluded_sessions.join("、") || "—"}</strong></div>
+              {r.excluded_trading_days.length > 0 && (
+                <div className="model-info-row"><span>排除日期</span><strong>{r.excluded_trading_days.join("、")}</strong></div>
+              )}
+              {r.n_gaps !== undefined && (
+                <div className="model-info-row"><span>時段內缺格</span><strong>{r.n_gaps.toLocaleString()} 處（不補棒）</strong></div>
+              )}
+              {r.sessions && <div className="model-info-row"><span>時段</span><strong>{Object.entries(r.sessions).map(([k, v]) => k + " " + v.toLocaleString()).join("、")}</strong></div>}
+              {r.rule_versions && Object.entries(r.rule_versions).map(([k, v]) => (
+                <div className="model-info-row" key={k}><span>資料版本</span><strong>{k}：{v.toLocaleString()}</strong></div>
+              ))}
+              <div className="model-info-row"><span>範圍</span><strong>{r.first_datetime} ~ {r.last_datetime}</strong></div>
+            </details>
+          ))}
+        </>
+      )}
+      {job.env_fingerprint && (
+        <details className="model-params-detail">
+          <summary>執行環境</summary>
+          {FINGERPRINT_KEYS.filter((k) => job.env_fingerprint?.[k] != null).map((k) => (
+            <div className="model-info-row" key={k}><span>{k}</span><strong>{String(job.env_fingerprint?.[k])}</strong></div>
+          ))}
+        </details>
+      )}
+    </div>
+  );
+}
+
 type InferPrediction = {
   id: number;
   ts: number;
@@ -811,6 +884,7 @@ export default function ModelTrainingPage() {
               )}
             </div>
           )}
+          {job && <DataRecordSection job={job} />}
           {job && !isInferJob && (
             <>
               <div className="model-left-section">

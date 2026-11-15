@@ -20,6 +20,7 @@ from training import job_store
 from training.graph_refs import GraphValidationError, validate_graph_spec
 from training.inference_store import list_predictions
 from training.phases import build_phase2_graph_spec, final_model_node_id, validate_parent_for_phase
+from training.provenance import period_warnings
 from training.preview_store import PREVIEW_CHANNEL_PREFIX, get_preview_sample, list_preview_samples
 from training.progress import CHANNEL_PREFIX
 from training.evaluation_records import enrich_job
@@ -80,8 +81,9 @@ async def start_training(body: TrainRequest):
             validate_graph_spec(graph_spec)
         except GraphValidationError as e:
             raise HTTPException(status_code=400, detail=f"繼承自母任務的圖不合法：{e}")
-        job_id = await job_store.create_job(graph_spec, phase=2, parent_job_id=body.parent_job_id)
-        return {"job_id": job_id}
+        warnings = period_warnings(graph_spec["start"], graph_spec["end"])
+        job_id = await job_store.create_job(graph_spec, phase=2, parent_job_id=body.parent_job_id, warnings=warnings)
+        return {"job_id": job_id, "warnings": warnings}
 
     # 後端也要擋不合法的圖，不能只靠前端擋——Agent 可能直接打 API 送 graph_spec，不會經過前端表單。
     # 所有「建立／繼承圖」的入口共用同一個驗證（training/graph_refs.py 的 validate_graph_spec），
@@ -91,8 +93,13 @@ async def start_training(body: TrainRequest):
         validate_graph_spec(graph_spec)
     except GraphValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    job_id = await job_store.create_job(graph_spec, phase=body.phase)
-    return {"job_id": job_id}
+    try:
+        # 研究期間上限只提示、不擋（見 training/provenance.py）；提示寫進任務紀錄並回給呼叫端
+        warnings = period_warnings(body.start, body.end)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="end 必須是 YYYY-MM-DD")
+    job_id = await job_store.create_job(graph_spec, phase=body.phase, warnings=warnings)
+    return {"job_id": job_id, "warnings": warnings}
 
 
 @router.get("/jobs")
@@ -269,11 +276,16 @@ async def start_inference(body: InferRequest):
         "start": body.start, "end": body.end,
         "use_weights": body.use_weights,  # 一律明確記錄用了哪組權重（best／last）
     }
+    try:
+        warnings = period_warnings(body.start, body.end)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="end 必須是 YYYY-MM-DD")
     job_id = await job_store.create_job(
         infer_spec, job_type="infer",
         phase=body.phase, parent_job_id=body.target_job_id if body.phase == 3 else None,
+        warnings=warnings,
     )
-    return {"job_id": job_id}
+    return {"job_id": job_id, "warnings": warnings}
 
 
 @router.get("/artifacts")

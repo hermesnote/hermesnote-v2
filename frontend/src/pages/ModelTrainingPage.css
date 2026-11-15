@@ -596,3 +596,11 @@
   color: var(--ink-faint);
   margin-bottom: 6px;
 }
+
+/* 任務提示（只提示、不擋）：例如期間超過研究資料上限 */
+.model-info-warning {
+  color: var(--status-amber);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  margin: 4px 0;
+}

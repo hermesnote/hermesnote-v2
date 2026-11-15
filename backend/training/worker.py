@@ -35,6 +35,7 @@ from training.inference import run_inference_chunked
 from training.inference_store import open_prediction_writer
 from training.preview_store import save_preview_sample
 from training.progress import write_progress
+from training.provenance import data_report, env_fingerprint
 
 POLL_INTERVAL_SEC   = 5
 GPU_BUSY_RETRY_SEC  = 30
@@ -191,6 +192,7 @@ async def run_one(job_id: str, graph_spec: dict, phase=None):
     # 訊息就是驗證回報的全部問題。
     validate_graph_spec(graph_spec)
     dfs = await _load_dataframes(graph_spec)
+    await job_store.save_data_report(job_id, data_report(dfs, graph_spec))
     result = await asyncio.to_thread(run_one_sync, job_id, graph_spec, dfs, phase)
     await job_store.mark_done(job_id, result)
     print(f"[worker] job {job_id} done: {result}", flush=True)
@@ -277,6 +279,7 @@ async def run_one_infer(job_id: str, infer_spec: dict):
     end = date.fromisoformat(infer_spec["end"])
     use_weights = infer_spec["use_weights"]
     dfs = await _load_dataframes_for_infer(target_job_id, target_node_id, start, end)
+    await job_store.save_data_report(job_id, data_report(dfs, infer_spec))
     summary = await asyncio.to_thread(run_infer_sync, job_id, target_job_id, target_node_id, dfs, use_weights)
     await job_store.mark_done(job_id, {target_node_id: summary})
     print(f"[worker] infer job {job_id} done（{summary['count']} 筆預測已分批存入 model_inference_predictions）", flush=True)
@@ -298,7 +301,7 @@ async def main_loop():
 
         import torch
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        await job_store.mark_running(job["id"], device)
+        await job_store.mark_running(job["id"], device, env_fingerprint())
         print(f"[worker] picked up job {job['id']} (job_type={job['job_type']}) GPU：{reason}", flush=True)
         try:
             if job["job_type"] == "infer":

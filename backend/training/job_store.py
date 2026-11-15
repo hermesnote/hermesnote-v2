@@ -5,6 +5,7 @@ import uuid
 
 from services.hermesnote_db import get_conn
 from training import json_safe
+from training.provenance import PIPELINE_VERSION
 
 # 2026-09-18 修正：`result` 這個 JSONB 欄位本來應該只放摘要（final_metrics/device/
 # training_meta 這類），但 graph.py 曾經把逐樣本長度的 prediction_source 陣列也塞進去
@@ -32,8 +33,30 @@ _RESULT_PROJECTION = """
 """
 
 
+# 流程版本與資料紀錄（2026-11 M1 遷移新增）。舊任務這些欄位是 NULL：pipeline_version=None 代表 2026-11-r1 以前。
+# 列表不帶 data_report 全文（每個時間框架一份報告），只帶提示；單筆查詢才帶完整內容。
+_PROVENANCE_COLUMNS = ", pipeline_version, warnings, env_fingerprint, data_report"
+
+
+def _provenance(row, with_report: bool) -> dict:
+    def load(v):
+        return json.loads(v) if v else None
+
+    report = load(row["data_report"])
+    warnings = load(row["warnings"]) or []
+    # 執行時的提示（data_report.warnings）優先：worker 用的是實際執行的規則
+    if report and report.get("warnings") is not None:
+        warnings = report["warnings"]
+    out = {"pipeline_version": row["pipeline_version"], "warnings": warnings}
+    if with_report:
+        out["env_fingerprint"] = load(row["env_fingerprint"])
+        out["data_report"] = report
+    return out
+
+
 async def create_job(
-    graph_spec: dict, job_type: str = "train", phase: int | None = None, parent_job_id: str | None = None
+    graph_spec: dict, job_type: str = "train", phase: int | None = None, parent_job_id: str | None = None,
+    warnings: list | None = None,
 ) -> str:
     """`graph_spec` 這個欄位名稱是歷史包袱——job_type='infer' 時裡面存的不是節點圖，
     是 `{"target_job_id","target_node_id","start","end"}` 這種推論請求，重用同一個
@@ -43,12 +66,13 @@ async def create_job(
     try:
         row = await conn.fetchrow(
             """
-            INSERT INTO model_training_jobs (graph_spec, status, job_type, phase, parent_job_id)
-            VALUES ($1, 'pending', $2, $3, $4)
+            INSERT INTO model_training_jobs (graph_spec, status, job_type, phase, parent_job_id, pipeline_version, warnings)
+            VALUES ($1, 'pending', $2, $3, $4, $5, $6)
             RETURNING id
             """,
             json.dumps(graph_spec), job_type, phase,
             uuid.UUID(parent_job_id) if parent_job_id else None,
+            PIPELINE_VERSION, json.dumps(warnings or []),
         )
         return str(row["id"])
     finally:
@@ -78,12 +102,27 @@ async def fetch_next_pending() -> dict | None:
             "phase": row["phase"]}
 
 
-async def mark_running(job_id: str, device: str) -> None:
+async def mark_running(job_id: str, device: str, env_fingerprint: dict | None = None) -> None:
+    """執行當下的流程版本以 worker 的程式為準（建立時記的是 web 容器的版本，兩者部署期間可能短暫不同）。"""
     conn = await get_conn()
     try:
         await conn.execute(
-            "UPDATE model_training_jobs SET status = 'running', device = $2, started_at = now() WHERE id = $1",
-            uuid.UUID(job_id), device,
+            "UPDATE model_training_jobs SET status = 'running', device = $2, started_at = now(), "
+            "pipeline_version = $3, env_fingerprint = $4 WHERE id = $1",
+            uuid.UUID(job_id), device, PIPELINE_VERSION, json_safe.dumps(env_fingerprint or {}),
+        )
+    finally:
+        await conn.close()
+
+
+async def save_data_report(job_id: str, report: dict) -> None:
+    """讀取報告（各時間框架的排除筆數、rule_version 分布、缺格數、期間提示）；讀完資料、訓練前寫入，
+    所以訓練失敗的任務也查得到當時讀到什麼。"""
+    conn = await get_conn()
+    try:
+        await conn.execute(
+            "UPDATE model_training_jobs SET data_report = $2 WHERE id = $1",
+            uuid.UUID(job_id), json_safe.dumps(report),
         )
     finally:
         await conn.close()
@@ -117,7 +156,7 @@ async def list_jobs(limit: int = 20) -> list[dict]:
         rows = await conn.fetch(
             f"""
             SELECT id, graph_spec, status, error, {_RESULT_PROJECTION} AS result, device, job_type,
-                   phase, parent_job_id, created_at, started_at, finished_at
+                   phase, parent_job_id, created_at, started_at, finished_at{_PROVENANCE_COLUMNS}
             FROM model_training_jobs
             ORDER BY created_at DESC
             LIMIT $1
@@ -140,6 +179,7 @@ async def list_jobs(limit: int = 20) -> list[dict]:
             "created_at": r["created_at"].isoformat(),
             "started_at": r["started_at"].isoformat() if r["started_at"] else None,
             "finished_at": r["finished_at"].isoformat() if r["finished_at"] else None,
+            **_provenance(r, with_report=False),
         }
         for r in rows
     ]
@@ -151,7 +191,7 @@ async def get_job(job_id: str) -> dict | None:
         row = await conn.fetchrow(
             f"""
             SELECT id, graph_spec, status, error, {_RESULT_PROJECTION} AS result, device, job_type,
-                   phase, parent_job_id, created_at, started_at, finished_at
+                   phase, parent_job_id, created_at, started_at, finished_at{_PROVENANCE_COLUMNS}
             FROM model_training_jobs WHERE id = $1
             """,
             uuid.UUID(job_id),
@@ -173,6 +213,7 @@ async def get_job(job_id: str) -> dict | None:
         "created_at": row["created_at"].isoformat(),
         "started_at": row["started_at"].isoformat() if row["started_at"] else None,
         "finished_at": row["finished_at"].isoformat() if row["finished_at"] else None,
+        **_provenance(row, with_report=True),
     }
 
 

@@ -229,9 +229,47 @@ def validate_graph_spec(graph_spec: dict) -> None:
                     f"Model 節點 {nid}：節點 {ref.node!r} 沒有輸出 {ref.output!r}，可用的輸出：{sorted(model_specs[ref.node])}"
                 )
 
-    issues.extend(_cycle_issues(edges))
+    cycle_problems = _cycle_issues(edges)
+    issues.extend(cycle_problems)
+    if not cycle_problems:
+        issues.extend(cross_timeframe_issues(nodes, edges))
     if issues:
         raise GraphValidationError(issues)
+
+
+# 跨時間框架的圖（同一個 Model Node 的輸入、上游與 Label 用到不同 timeframe）暫時拒絕：目前 graph.py 以
+# datetime 取交集對齊，而舊版資料的 datetime 是桶內第一筆成交的秒數，不同週期對不上，且可能用到還沒收完的
+# K 棒。M4 改成依 bar_start_ts 對齊、bar_end_ts＋延遲判定可用之後才開放（把這個旗標改成 True）。
+CROSS_TIMEFRAME_ENABLED = False
+
+
+def cross_timeframe_issues(nodes: dict, edges: dict) -> list[str]:
+    if CROSS_TIMEFRAME_ENABLED:
+        return []
+    memo: dict = {}
+
+    def tfs(nid: str) -> set:
+        if nid in memo:
+            return memo[nid]
+        n = nodes.get(nid)
+        out: set = set()
+        if n is not None and n["type"] in ("feature", "label"):
+            if isinstance(n.get("timeframe"), str):
+                out.add(n["timeframe"])
+        elif n is not None:
+            for dep in edges.get(nid, []):
+                out |= tfs(dep)
+        memo[nid] = out
+        return out
+
+    issues = []
+    for nid, n in nodes.items():
+        if n["type"] == "model":
+            used = tfs(nid)
+            if len(used) > 1:
+                issues.append(f"Model 節點 {nid}：輸入與 Label 用到多個時間框架 {sorted(used)}；"
+                              "跨時間框架對齊（依 bar_start_ts 對齊、依 bar_end_ts 判定可用）完成前暫不開放")
+    return issues
 
 
 def _cycle_issues(edges: dict) -> list[str]:

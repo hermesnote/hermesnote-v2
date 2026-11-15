@@ -208,19 +208,19 @@ class ChainPropagationInferenceTests(unittest.TestCase):
 
 # ── 缺 bar_end_ts 欄位的資料表：明確的讀取退路 ─────────────────────────────────────────
 class FakeConn:
+    """只模擬 information_schema 欄位查詢與主查詢（日線表沒有 session 等選用欄位時的行為）。"""
+
     def __init__(self, has_bar_end):
         self.has_bar_end = has_bar_end
         self.fetch_sql = None
         self.fetchval_args = None
         self.closed = False
 
-    async def fetchval(self, sql, *args):
-        self.fetchval_args = args
-        return self.has_bar_end
-
     async def fetch(self, sql, *args):
+        if "information_schema" in sql:
+            self.fetchval_args = args[:2]
+            return [{"column_name": "bar_end_ts"}] if self.has_bar_end else []
         self.fetch_sql = sql
-        cols = ["datetime", "open", "high", "low", "close", "volume"] + (["bar_end_ts"] if self.has_bar_end else [])
         t = pd.Timestamp("2024-01-02 08:45")
         row = [t, 1.0, 2.0, 0.5, 1.5, 10] + ([t + pd.Timedelta(hours=5)] if self.has_bar_end else [])
         return [tuple(row)]
