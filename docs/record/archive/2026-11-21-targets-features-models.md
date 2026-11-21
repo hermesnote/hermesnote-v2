@@ -77,3 +77,4 @@ Dot 的評估請求（首次越界、區間高低點、價格位置／K 棒形�
 - 測試：`V2SummaryTests` 4 項（API 回應補回、摘要保留、A 14 欄 cols [0,5]/[5,14]、B 5 欄單分支相容、產物推回與原值相同、來源矛盾時維持未知）；全部 332 項通過（skipped 15）。另以 MCP 指定的 A／B Phase 1 任務唯讀驗證：A dn 14 欄（u＝[5,14]，來源 model_config.input_layout）、B dn 5 欄（legacy_single_branch，來源 n_features＋graph_spec_snapshot）。
 - 部署（Hermes 同意，commit `92673fd`）：部署前 pending／running 0 筆；backend／training 重建，容器內 4 個改動檔 md5 與本機相同。線上 `GET /api/model/jobs/{id}`：A dn 14 欄（u＝[5,14]）、B dn 5 欄 legacy_single_branch、mask_branches＝["u"]，皆 backfilled；`job-summaries` 200；worker 取得鎖。退版＝`git checkout 24ab98e -- <改動檔>` 後重新部署。
 - 同次刪除 `backend/tmp_ind_full.json`（Hermes 同意；本機刪除，NAS 由部署同步移除）。
+- MCP 唯讀驗收通過（同日）：A dn 14 欄、B dn 5 欄 legacy_single_branch＋mask_branches＝["u"]、兩組 up 5 欄，source／unknown 正確；移除新增的 v2 後原有結果欄位雜湊與部署前一致。未重訓、未改既有結果。
