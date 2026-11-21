@@ -69,3 +69,9 @@ Dot 的評估請求（首次越界、區間高低點、價格位置／K 棒形�
 - 未做：MCP 小資料驗收（交由 MCP 端執行）。
 
 - 部署後（Hermes 同意）：透過 SMB 刪除 NAS 上舊的 `backend/tests`（26 個舊測試檔，皆在 Git 內）。後端容器映像內仍有一份舊副本，下次部署重建時自然消失。
+
+## job.result 漏 v2（MCP 回報，同日，未部署）
+- 原因：`training/worker.py` 的 `_SUMMARY_KEYS` 白名單沒有 `v2`，`engine_v2` 產生的 `res["v2"]` 經 `_summarize` 後被丟掉。
+- 修正：白名單加 `v2`；`res["v2"]` 多 `model_input_format`（`input_layout`／`legacy_single_branch`）與 `mask_branches`。模型、權重、訓練流程不變（harness ALL MATCH）。
+- 舊任務：`GET /api/model/jobs/{id}` 回應時用 `services/model_artifacts.backfill_v2` 從同任務 `model_artifacts`（model_config／preprocessing_state／graph_spec_snapshot／warmup_policy／history_requirements／fingerprint）唯讀推回，標 `backfilled`／`source`／`unknown`；不寫 DB、不重訓。
+- 測試：`V2SummaryTests` 4 項（API 回應補回、摘要保留、A 14 欄 cols [0,5]/[5,14]、B 5 欄單分支相容、產物推回與原值相同、來源矛盾時維持未知）；全部 332 項通過（skipped 15）。另以 MCP 指定的 A／B Phase 1 任務唯讀驗證：A dn 14 欄（u＝[5,14]，來源 model_config.input_layout）、B dn 5 欄（legacy_single_branch，來源 n_features＋graph_spec_snapshot）。

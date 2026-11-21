@@ -339,6 +339,108 @@ class SharedMaskTests(unittest.TestCase):
         self.assertEqual(outs[0], outs[1])
 
 
+def _ab(mask: bool, key="lstm"):
+    """MCP 驗收 A／B 的縮小版：pp＋cp（5 欄）＋上游 9 類機率；B 的上游分支 role=mask。"""
+    up = mdl("up", ["pp", "cp"], "xgboost", window=1, output_mode="probability",
+             branches=[{"id": "main", "inputs": ["pp", "cp"], "window": 1, "encoder": "last_value"}],
+             upstream_policy={"strategy": "forward_chaining", "k": 3})
+    u = {"id": "u", "inputs": ["up"], "window": 1, "encoder": "last_value", **({"role": "mask"} if mask else {})}
+    dn = mdl("dn", ["pp", "cp", "up"], key, branches=[{"id": "main", "inputs": ["pp", "cp"], "window": 12}, u])
+    return spec(feat("pp", key="price_position", params={"bounds": BB}), feat("cp", key="candle_parts"),
+                fc_label(), up, dn)
+
+
+class V2SummaryTests(unittest.TestCase):
+    """2026-11-21：job.result 保留 v2（input_layout 等）；舊任務由模型產物唯讀補回。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.runs = {}
+        for name, mask in (("A", False), ("B", True)):
+            g = _ab(mask)
+            r, f, _ = ev.run_train_v2(g, MK, phase=1)
+            cls.runs[name] = (g, r, f)
+
+    @staticmethod
+    def _art(g, r, nid):
+        import hashlib
+
+        return {"model_config": r[nid]["model_config"], "preprocessing_state": r[nid]["preprocessing_state"],
+                "graph_spec_snapshot": g, "warmup_policy": r[nid]["v2"]["warmup_policy"],
+                "history_requirements": r[nid]["v2"]["history_requirements"],
+                "fingerprint": hashlib.sha256(bytes(r[nid]["weights"])).hexdigest()}
+
+    def test_summary_keeps_v2(self):
+        from training.worker import _summarize
+
+        for name, f_total, fmt in (("A", 14, "input_layout"), ("B", 5, "legacy_single_branch")):
+            with self.subTest(arm=name):
+                g, r, _ = self.runs[name]
+                s = _summarize(r, g, phase=1)
+                v2 = s["dn"]["v2"]
+                self.assertEqual(v2["input_layout"], r["dn"]["v2"]["input_layout"])
+                self.assertEqual(v2["input_layout"]["f_total"], f_total)
+                self.assertEqual(v2["model_input_format"], fmt)
+                self.assertNotIn("weights", s["dn"])
+                self.assertIn("v2", s["up"])
+        la = self.runs["A"][1]["dn"]["v2"]["input_layout"]["branches"]
+        self.assertEqual([b["cols"] for b in la], [[0, 5], [5, 14]])
+        self.assertEqual(self.runs["B"][1]["dn"]["v2"]["mask_branches"], ["u"])
+
+    def test_single_branch_model_format_unchanged(self):
+        # B 是單分支：模型不收 input_layout（權重格式同舊版），只有摘要多了 v2
+        _, rb, _ = self.runs["B"]
+        self.assertNotIn("input_layout", rb["dn"]["model_config"])
+        self.assertEqual(rb["dn"]["model_config"]["n_features"], 5)
+        _, ra, _ = self.runs["A"]
+        self.assertEqual(ra["dn"]["model_config"]["input_layout"]["f_total"], 14)
+
+    def test_backfill_from_artifact(self):
+        from services.model_artifacts import v2_from_artifact
+
+        for name in ("A", "B"):
+            g, r, f = self.runs[name]
+            for nid in ("dn", "up"):
+                with self.subTest(arm=name, node=nid):
+                    out = v2_from_artifact(nid, self._art(g, r, nid), f.hash)
+                    self.assertTrue(out["backfilled"])
+                    self.assertEqual(out["input_layout"], r[nid]["v2"]["input_layout"])
+                    self.assertEqual(out["model_input_format"], r[nid]["v2"]["model_input_format"])
+                    self.assertEqual(out["mask_branches"], r[nid]["v2"]["mask_branches"])
+                    self.assertEqual(out["weights_fingerprint"], r[nid]["v2"]["weights_fingerprint"])
+                    self.assertEqual(out["frame_hash"], r[nid]["v2"]["frame_hash"])
+                    self.assertIn("input_layout", out["source"])
+                    self.assertEqual(out["unknown"], ["alignment", "upstream_policy"])
+        g, r, _ = self.runs["B"]
+        self.assertTrue(v2_from_artifact("dn", self._art(g, r, "dn"))["source"]["input_layout"]
+                        .startswith("model_artifacts.model_config.n_features"))
+        # 沒有產物、或來源不一致：維持未知
+        self.assertIsNone(v2_from_artifact("dn", None)["input_layout"])
+        bad = self._art(g, r, "dn")
+        bad["model_config"] = {**bad["model_config"], "n_features": 6}
+        self.assertIsNone(v2_from_artifact("dn", bad)["input_layout"])
+        self.assertIn("input_layout", v2_from_artifact("dn", bad)["unknown"])
+
+    def test_backfill_job_response(self):
+        # get_job 的形狀（job_id 鍵）；DB 讀取換成本地產物；已有 v2 的節點不動
+        import asyncio
+        from unittest import mock
+
+        from services import model_artifacts as ma
+
+        g, r, f = self.runs["A"]
+        arts = {nid: self._art(g, r, nid) for nid in ("up", "dn")}
+        keep = {"input_layout": "原值"}
+        job = {"job_id": "c0237875-f25e-4858-b56b-c3923e2c277c", "job_type": "train", "graph_spec": g,
+               "result": {"dn": {"training_meta": {"frame": {"hash": f.hash}}}, "up": {"v2": keep}}}
+        with mock.patch.object(ma, "v2_artifact_sources", mock.AsyncMock(return_value=arts)) as src:
+            out = asyncio.run(ma.backfill_v2(job))
+        src.assert_awaited_once_with("c0237875-f25e-4858-b56b-c3923e2c277c")
+        self.assertEqual(out["result"]["dn"]["v2"]["input_layout"]["f_total"], 14)
+        self.assertEqual(out["result"]["dn"]["v2"]["frame_hash"], f.hash)
+        self.assertIs(out["result"]["up"]["v2"], keep)
+
+
 class DotConfigTests(unittest.TestCase):
     """Dot 2026-11-21 本機驗收配置（window 60）。"""
 

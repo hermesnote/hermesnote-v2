@@ -473,6 +473,9 @@ class Trainer:
             **({"cascade": cascade_meta} if cascade_meta else {}),
         }
         res["v2"] = {"input_layout": asm.layout, "warmup_policy": warmups, "frame_hash": frame.hash,
+                     "model_input_format": ("legacy_single_branch" if vi.is_legacy_layout(asm.layout, vi.family_of(node))
+                                            else "input_layout"),
+                     "mask_branches": list(getattr(asm, "mask_branches", [])),
                      "alignment": ctx.alignment, "decision_timeframe": T.tf,
                      "history_requirements": vi.history_requirements(ctx.spec),
                      "weights_fingerprint": _fingerprint(res.get("weights")),

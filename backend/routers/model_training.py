@@ -122,7 +122,8 @@ async def get_training_job(job_id: str):
     job = await job_store.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="找不到這個訓練任務")
-    return enrich_job(job)
+    # 2026-11-21 以前完成的 v2 任務摘要缺 v2：由同任務的模型產物唯讀補上並標來源（不改寫資料庫）
+    return await model_artifacts.backfill_v2(enrich_job(job))
 
 
 @router.delete("/jobs/{job_id}")

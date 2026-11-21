@@ -632,6 +632,9 @@ cm = pick(r, "default", "best")["metrics"]["confusion_matrix"]["values"]
 | `data_report.resources` | 任務結束時（成功或失敗；被系統終止則沒有） | worker 程序峰值記憶體：`peak_rss_bytes`／`peak_rss_gib`（`VmHWM`），`scope` 為 `this_job`（每筆開始時歸零）或 `process_lifetime`（無法歸零時） |
 | `data_report` | 讀完資料、訓練開始前（訓練失敗的任務也查得到） | 每個時間框架讀到什麼、排除了什麼。`n_excluded`：排除的 `session='other'` 列數；`n_gaps`：同一交易日同一時段內相鄰 K 棒間隔超過一個週期的次數；`n_missing_bars`：缺的 K 棒總數（**只統計，不補棒，也不擋訓練**）；日線表沒有 `n_gaps`；`available_time`：目前的資訊可用時間假設（發布延遲 0 秒為未實測假設） |
 
+**`result[node].v2`（v2 流程，2026-11-21 起保存）：** 輕量 metadata，`input_layout`（`{version, w_max, f_total, branches:[{id, timeframe, window, encoder, cols:[起, 迄)}]}`，只含 role=input 的分支）、`model_input_format`（`input_layout`＝模型收到多分支格式；`legacy_single_branch`＝單一分支相容格式，模型的 `model_config` 不含 `input_layout`、權重格式同舊版，但這裡的 `input_layout` 仍是實際欄位配置）、`mask_branches`、`warmup_policy`、`frame_hash`、`alignment`、`decision_timeframe`、`history_requirements`、`weights_fingerprint`、`upstream_policy`。
+2026-11-21 以前完成的任務沒存這欄：`GET /jobs/{id}` 回應時由同任務的 `model_artifacts` 唯讀推回（不改寫資料庫），多 `backfilled: true`、`source`（逐欄來源）、`unknown`（推不出的欄位，固定含 `alignment`、`upstream_policy`）。`input_layout` 來源依序：`model_config.input_layout` → 單一分支時 `model_config.n_features` → 各分支 `preprocessing_state` 的 global_minmax 欄數；來源互相矛盾或都沒有時為 `null` 並列入 `unknown`。沒有模型產物的節點全部列為未知。
+
 `status`：`pending`／`running`／`done`／`failed`（看 `error`）。worker 同時間只跑一筆；`pending` 表示還在排隊，或 GPU 實際可用顯存不足預留量（`TRAINING_GPU_MIN_FREE_MB`，預設 4096MiB，已先釋放 worker 自己的快取才判斷）而每 30 秒重試——延後原因（total／used／free、worker 自身佔用、門檻）記在 training 容器 log（`docker logs hermesnote-training`），API 不回傳。`result` 的 key 是每個 Model Node 的 `id`；`job_type='infer'` 的 job，`result[node_id]` 改成 `{"count": N, "start_ts": unix秒, "end_ts": unix秒}`（推論結果本身不在這裡，見下方 `/inference_predictions`）。
 
 ## `DELETE /api/model/jobs/{job_id}`

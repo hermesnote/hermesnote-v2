@@ -141,7 +141,9 @@ async def _load_dataframes(graph_spec: dict) -> dict:
 # 評估：訓練回傳的完整評估報告（evaluation {best,last}，見 training/evaluation.py）轉成通用的
 # evaluations 清單（標明模型節點、輸出頭、資料集、評估時點與基準）＋metric_specs 後保存，
 # 大小是 O(類別數)；原始 evaluation 不再另存（見 training/evaluation_records.py）。
-_SUMMARY_KEYS = {"final_metrics", "device", "training_meta", "output_specs", "train_stats"}
+# v2（2026-11-21）：v2 流程的輕量 metadata（input_layout、warmup_policy、frame_hash 等，大小 O(分支數＋特徵數)），
+# 先前漏列導致 GET /jobs/{id} 看不到 input_layout；舊任務由 services/model_artifacts.backfill_v2 回應時唯讀補上。
+_SUMMARY_KEYS = {"final_metrics", "device", "training_meta", "output_specs", "train_stats", "v2"}
 
 
 def _summarize(results: dict, graph_spec: dict, phase=None) -> dict:
