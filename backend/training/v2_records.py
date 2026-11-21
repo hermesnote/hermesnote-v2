@@ -77,9 +77,12 @@ def evaluate_entry(entry: dict, *, task_type: str, model_config: dict, stats: di
     skipped = np.asarray(entry.get("skipped", []))
     reasons = pd.Series([entry["asm"].reason[r] for r in skipped]).value_counts().to_dict() if len(skipped) else {}
     matured_le = rows.le[pts[inc]]
+    # 有預測但不納入評估的點依原因分開計（2026-11-21：n_unmatured 只算 label_unmatured；缺格、跨時段、起點界外另列）
+    excluded = pd.Series([str(rows.frame_reason[r]) for r in pts[~inc]]).value_counts().to_dict() if (~inc).any() else {}
     stats_out = {
         "n_points": int(len(pts) + len(skipped)), "n_predicted": int(len(pts)), "n_included": int(inc.sum()),
-        "n_unmatured": int((~inc).sum()), "n_skipped": int(len(skipped)),
+        "n_unmatured": int(excluded.get("label_unmatured", 0)), "n_excluded": int((~inc).sum()),
+        "excluded_reasons": {str(k): int(v) for k, v in excluded.items()}, "n_skipped": int(len(skipped)),
         "skipped_reasons": {str(k): int(v) for k, v in reasons.items()},
         "cutoff_ts": str(matured_le.max())[:19] if len(matured_le) else None,
         "baseline_stats": "train_stats" if stats else "unavailable",
@@ -88,15 +91,56 @@ def evaluate_entry(entry: dict, *, task_type: str, model_config: dict, stats: di
     return raw, stats_out
 
 
+EXCLUSION_LABEL = {"label_unmatured": "未成熟", "label_gap": "缺格", "label_cross_session": "跨時段",
+                   "label_start_outside": "起點在界外", "prediction_not_finite": "預測非有限值"}
+
+
+def holdout_counts(stats_out: dict) -> dict:
+    n_unm = int(stats_out.get("n_unmatured", 0))
+    return {"n_unmatured": n_unm, "n_excluded": int(stats_out.get("n_excluded", n_unm)),
+            "excluded_reasons": dict(stats_out.get("excluded_reasons") or ({"label_unmatured": n_unm} if n_unm else {})),
+            "n_skipped": int(stats_out.get("n_skipped", 0))}
+
+
+def holdout_description(stats_out: dict, period: dict) -> str:
+    c = holdout_counts(stats_out)
+    parts = "、".join(f"{EXCLUSION_LABEL.get(k, k)} {v}" for k, v in c["excluded_reasons"].items()) or "無"
+    return (f"測試期間 {period.get('start')}～{period.get('end')}：預測 {stats_out['n_predicted']} 筆，"
+            f"其中 {stats_out['n_included']} 筆納入評估（成熟截止 {stats_out['cutoff_ts']}）；"
+            f"不納入評估 {c['n_excluded']} 筆（{parts}）；輸入不足未預測 {c['n_skipped']} 筆")
+
+
+def backfill_holdout_counts(r: dict, reasons: dict) -> bool:
+    """舊 Phase 3 摘要（2026-11-21 以前：n_unmatured＝所有不納入評估的筆數）依逐筆原因唯讀補正（回應用，不寫回）。
+    reasons＝逐筆結果中 included=false 的 exclusion_reason 計數；與舊 n_unmatured 總數不符時不動、標未知。"""
+    h = r.get("holdout")
+    if not isinstance(h, dict) or "excluded_reasons" in h:
+        return False
+    stored = int(h.get("n_unmatured") or 0)
+    reasons = {str(k): int(v) for k, v in reasons.items()}
+    src = "model_prediction_records（dataset=holdout、weights=best、included=false 的 exclusion_reason）"
+    if sum(reasons.values()) != stored:
+        h["backfilled"] = {"source": src, "status": "unknown", "n_unmatured_stored": stored,
+                           "note": f"逐筆不納入筆數 {sum(reasons.values())} 與摘要 {stored} 不符，維持原值"}
+        return False
+    h.update(n_unmatured=reasons.get("label_unmatured", 0), n_excluded=stored, excluded_reasons=reasons)
+    h["backfilled"] = {"source": src, "n_unmatured_stored": stored}
+    for e in r.get("evaluations") or []:
+        d = e.get("dataset") or {}
+        if d.get("split") == "holdout":
+            d.update(holdout_counts(h))
+            d["description"] = holdout_description({**h, "n_included": d.get("n_samples", h.get("n_included"))},
+                                                   d.get("task_data_range") or {})
+            d["backfilled"] = h["backfilled"]
+    return True
+
+
 def holdout_evaluations(node_id: str, raw: dict, *, specs: dict | None, phase, period: dict, stats_out: dict) -> list:
     """與訓練時 evaluations 相同格式；dataset.split=holdout、point＝best／last 權重。"""
     heads = {h["key"]: h for h in (specs or {}).get("heads", [])}
     dataset = {"split": "holdout", "label": SPLIT_LABEL["holdout"], "selection": "holdout", "phase": phase,
-               "n_samples": stats_out["n_included"], "n_unmatured": stats_out["n_unmatured"],
-               "n_skipped": stats_out["n_skipped"], "task_data_range": period,
-               "description": (f"測試期間 {period.get('start')}～{period.get('end')}：預測 {stats_out['n_predicted']} 筆，"
-                               f"其中 {stats_out['n_included']} 筆答案已成熟納入評估（成熟截止 {stats_out['cutoff_ts']}），"
-                               f"{stats_out['n_unmatured']} 筆未成熟不評估；輸入不足未預測 {stats_out['n_skipped']} 筆")}
+               "n_samples": stats_out["n_included"], **holdout_counts(stats_out), "task_data_range": period,
+               "description": holdout_description(stats_out, period)}
     out = []
     for kind in ("best", "last"):
         report = raw.get(kind)

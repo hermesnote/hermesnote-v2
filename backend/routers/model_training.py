@@ -123,7 +123,17 @@ async def get_training_job(job_id: str):
     if job is None:
         raise HTTPException(status_code=404, detail="找不到這個訓練任務")
     # 2026-11-21 以前完成的 v2 任務摘要缺 v2：由同任務的模型產物唯讀補上並標來源（不改寫資料庫）
-    return await model_artifacts.backfill_v2(enrich_job(job))
+    job = await model_artifacts.backfill_v2(enrich_job(job))
+    # 2026-11-21 以前的 Phase 3 摘要 n_unmatured 混算所有不納入評估的筆數：依逐筆原因唯讀補正（不改寫資料庫）
+    if job.get("job_type") == "infer" and job.get("phase") == 3 and isinstance(job.get("result"), dict):
+        from training import experiment_store
+        from training.v2_records import backfill_holdout_counts
+
+        for nid, r in job["result"].items():
+            if isinstance(r, dict) and isinstance(r.get("holdout"), dict) and "excluded_reasons" not in r["holdout"]:
+                backfill_holdout_counts(r, await experiment_store.holdout_exclusion_counts(
+                    str(job.get("job_id") or job.get("id")), nid))
+    return job
 
 
 @router.delete("/jobs/{job_id}")

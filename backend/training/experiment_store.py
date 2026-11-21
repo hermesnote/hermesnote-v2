@@ -234,7 +234,7 @@ async def write_evaluation(job_id, node_id, phase, dataset, weights, evaluations
                 "INSERT INTO model_evaluations (job_id, node_id, phase, dataset, weights, evaluations, n_included, n_excluded, "
                 "excluded_reasons, cutoff_ts) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
                 _u(job_id), node_id, phase, dataset, weights, json_safe.dumps(evaluations), stats.get("n_included"),
-                stats.get("n_unmatured", 0) + stats.get("n_skipped", 0), json_safe.dumps(stats), _dt(stats.get("cutoff_ts")))
+                stats.get("n_excluded", stats.get("n_unmatured", 0)) + stats.get("n_skipped", 0), json_safe.dumps(stats), _dt(stats.get("cutoff_ts")))
     finally:
         await conn.close()
 
@@ -344,3 +344,15 @@ async def audit_inputs(job_id: str) -> dict:
         return {"records": recs, "folds": folds}
     finally:
         await conn.close()
+
+
+async def holdout_exclusion_counts(job_id: str, node_id: str, weights: str = "best") -> dict:
+    """唯讀：某 Phase 3 任務 holdout 逐筆結果中不納入評估的原因計數（舊摘要補正用）。"""
+    conn = await get_conn()
+    try:
+        rows = await conn.fetch(
+            "SELECT exclusion_reason, count(*) n FROM model_prediction_records WHERE job_id = $1 AND node_id = $2 "
+            "AND dataset = 'holdout' AND weights = $3 AND NOT included GROUP BY 1", _u(job_id), node_id, weights)
+    finally:
+        await conn.close()
+    return {str(r["exclusion_reason"]): int(r["n"]) for r in rows}

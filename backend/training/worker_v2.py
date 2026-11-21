@@ -309,7 +309,9 @@ async def _phase3_legacy(job_id: str, spec: dict, snap: dict, art: dict) -> None
                                  bool(inc[i]), None if inc[i] else ("prediction_not_finite" if not finite[i] else "label_unmatured"),
                                  None, None))
         st = {"n_points": int(len(ts)), "n_predicted": int(len(ts)), "n_included": int(inc.sum()),
-              "n_unmatured": int((~inc & finite).sum()), "n_skipped": int((~finite).sum()),
+              "n_unmatured": int((~inc & finite).sum()), "n_excluded": int((~inc & finite).sum()),
+              "excluded_reasons": {"label_unmatured": int((~inc & finite).sum())} if (~inc & finite).any() else {},
+              "n_skipped": int((~finite).sum()),
               "skipped_reasons": {"prediction_not_finite": int((~finite).sum())} if (~finite).any() else {},
               "cutoff_ts": str(ts[inc].max())[:19] if inc.any() else None,
               "baseline_stats": "train_stats" if stats else "unavailable（舊產物沒有保存訓練集統計）",

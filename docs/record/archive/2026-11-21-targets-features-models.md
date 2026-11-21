@@ -78,3 +78,9 @@ Dot 的評估請求（首次越界、區間高低點、價格位置／K 棒形�
 - 部署（Hermes 同意，commit `92673fd`）：部署前 pending／running 0 筆；backend／training 重建，容器內 4 個改動檔 md5 與本機相同。線上 `GET /api/model/jobs/{id}`：A dn 14 欄（u＝[5,14]）、B dn 5 欄 legacy_single_branch、mask_branches＝["u"]，皆 backfilled；`job-summaries` 200；worker 取得鎖。退版＝`git checkout 24ab98e -- <改動檔>` 後重新部署。
 - 同次刪除 `backend/tmp_ind_full.json`（Hermes 同意；本機刪除，NAS 由部署同步移除）。
 - MCP 唯讀驗收通過（同日）：A dn 14 欄、B dn 5 欄 legacy_single_branch＋mask_branches＝["u"]、兩組 up 5 欄，source／unknown 正確；移除新增的 v2 後原有結果欄位雜湊與部署前一致。未重訓、未改既有結果。
+
+## Phase 3 holdout.n_unmatured 混算（MCP 回報，同日，未部署）
+- 原因：`v2_records.evaluate_entry` 以「未納入評估」計 `n_unmatured`；11-21 新增 label_gap／cross_session／start_outside 後被一起算進去。實例（唯讀）：高點 97f106eb、低點 11efbc24 摘要 65＝gap 40＋cross_session 20＋unmatured 5，納入 2,507 筆，評分本身正確。
+- 修正（Hermes 同意：n_unmatured 只算未成熟）：新增 `n_excluded`、`excluded_reasons`；說明文字依原因列出；`model_evaluations.n_excluded` 改用 `n_excluded`＋`n_skipped`（數值不變）；舊路徑 Phase 3 同步補欄；後台實驗頁 Holdout 行顯示分項。
+- 舊任務：`GET /jobs/{id}` 對 Phase 3 依逐筆 exclusion_reason 唯讀補正並標 `backfilled`；總數不符維持原值。兩筆實例唯讀試算：n_unmatured 5、n_excluded 65。
+- 測試：`HoldoutCountTests` 2 項；全部 334 項通過（skipped 15）；harness ALL MATCH；前端 tsc 通過。

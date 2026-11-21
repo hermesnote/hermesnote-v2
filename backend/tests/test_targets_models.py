@@ -441,6 +441,58 @@ class V2SummaryTests(unittest.TestCase):
         self.assertIs(out["result"]["up"]["v2"], keep)
 
 
+class HoldoutCountTests(unittest.TestCase):
+    """2026-11-21：Phase 3 n_unmatured 只算 label_unmatured；缺格／跨時段等另列 excluded_reasons。"""
+
+    def test_counts_split_by_reason(self):
+        from training.v2_records import evaluate_entry, holdout_description, holdout_evaluations
+
+        g = spec(feat("f"), reg_label(), mdl("m", ["f"], "xgboost"))
+        g["end"] = "2024-01-15"
+        res, _, _ = ev.run_train_v2(g, MK, phase=1)
+        out = ev.run_infer_v2(g, artifacts_of(res, g), MK, "2024-01-10", "2024-01-15")
+        raw, st = evaluate_entry({**out, "frame_hash": out["frame"].hash}, task_type="regression",
+                                 model_config=out["model_config"], stats=res["m"]["train_stats"])
+        reasons = st["excluded_reasons"]
+        self.assertGreater(reasons.get("label_cross_session", 0), 0)
+        self.assertEqual(st["n_unmatured"], reasons.get("label_unmatured", 0))
+        self.assertEqual(st["n_excluded"], sum(reasons.values()))
+        self.assertEqual(st["n_included"] + st["n_excluded"], st["n_predicted"])
+        self.assertLess(st["n_unmatured"], st["n_excluded"])
+        ev_ = holdout_evaluations("m", raw, specs=None, phase=3, period={"start": "2024-01-10", "end": "2024-01-15"},
+                                  stats_out=st)
+        d = ev_[0]["dataset"]
+        self.assertEqual((d["n_unmatured"], d["n_excluded"], d["excluded_reasons"]),
+                         (st["n_unmatured"], st["n_excluded"], reasons))
+        self.assertIn("跨時段", holdout_description(st, {}))
+
+    def test_backfill_old_summary(self):
+        from training.v2_records import backfill_holdout_counts
+
+        def old():
+            ds = {"split": "holdout", "n_samples": 2507, "n_unmatured": 65, "n_skipped": 0,
+                  "task_data_range": {"start": "2024-02-02", "end": "2024-02-08"}, "description": "65 筆未成熟不評估"}
+            return {"holdout": {"n_points": 2572, "n_predicted": 2572, "n_included": 2507, "n_unmatured": 65,
+                                "n_skipped": 0, "cutoff_ts": "2024-02-06 05:00:00"},
+                    "evaluations": [{"dataset": ds}, {"dataset": {"split": "val", "n_unmatured": 0}}]}
+
+        r = old()
+        reasons = {"label_gap": 40, "label_cross_session": 20, "label_unmatured": 5}
+        self.assertTrue(backfill_holdout_counts(r, reasons))
+        h = r["holdout"]
+        self.assertEqual((h["n_unmatured"], h["n_excluded"], h["excluded_reasons"]), (5, 65, reasons))
+        self.assertEqual(h["backfilled"]["n_unmatured_stored"], 65)
+        d = r["evaluations"][0]["dataset"]
+        self.assertEqual((d["n_unmatured"], d["n_excluded"]), (5, 65))
+        self.assertIn("缺格 40", d["description"])
+        self.assertNotIn("backfilled", r["evaluations"][1]["dataset"])
+        self.assertFalse(backfill_holdout_counts(r, reasons))  # 已補正／新格式不再動
+        r2 = old()
+        self.assertFalse(backfill_holdout_counts(r2, {"label_gap": 1}))  # 總數不符：維持原值、標未知
+        self.assertEqual(r2["holdout"]["n_unmatured"], 65)
+        self.assertEqual(r2["holdout"]["backfilled"]["status"], "unknown")
+
+
 class DotConfigTests(unittest.TestCase):
     """Dot 2026-11-21 本機驗收配置（window 60）。"""
 

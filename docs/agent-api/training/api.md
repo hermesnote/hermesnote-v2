@@ -713,7 +713,8 @@ cm = pick(r, "default", "best")["metrics"]["confusion_matrix"]["values"]
   "result": {
     "m": {
       "count": 5124, "start_ts": 1735779600, "end_ts": 1767159000, "use_weights": "best",
-      "holdout": {"n_points": 5124, "n_predicted": 5124, "n_included": 5123, "n_unmatured": 1, "n_skipped": 0,
+      "holdout": {"n_points": 5124, "n_predicted": 5124, "n_included": 5123, "n_unmatured": 1, "n_excluded": 1,
+                  "excluded_reasons": {"label_unmatured": 1}, "n_skipped": 0,
                   "skipped_reasons": {}, "cutoff_ts": "2025-12-31 13:45:00", "baseline_stats": "train_stats"},
       "metric_specs": {"...": "同訓練任務"},
       "evaluations": [
@@ -729,6 +730,8 @@ cm = pick(r, "default", "best")["metrics"]["confusion_matrix"]["values"]
   }
 }
 ```
+
+**holdout 計數（2026-11-21 起）：** `n_predicted`＝`n_included`＋`n_excluded`。`n_excluded`＝有預測但不納入評估的總數，`excluded_reasons` 依原因分開（`label_unmatured`／`label_gap`／`label_cross_session`／`label_start_outside`）；`n_unmatured` **只算** `label_unmatured`；`n_skipped`＝輸入不足未預測（原因見 `skipped_reasons`）。`evaluations[].dataset` 帶同一組計數。此前的 v2 任務 `n_unmatured` 是不納入評估的總數（混算）：`GET /jobs/{id}` 回應時依該任務 `dataset=holdout`、`weights=best` 的逐筆 `exclusion_reason` 唯讀補正（不改寫資料庫），並加 `backfilled: {source, n_unmatured_stored}`；逐筆總數與摘要不符時維持原值，`backfilled.status="unknown"`。`GET /jobs/{id}/evaluations` 讀的是當時保存的評估，舊任務不補正。
 
 數值只是格式示意。`evaluations` 的格式與訓練任務相同（同一套指標鍵與 `metric_specs`），只差 `dataset.split="holdout"`、`point.kind` 是權重。`GET /jobs/{id}/evaluations` 回同一份內容（每組權重一列，含 `n_included`、`excluded_reasons`、`cutoff_ts`）。
 

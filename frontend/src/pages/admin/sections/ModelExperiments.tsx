@@ -246,7 +246,7 @@ function JobDetail({ jobId }: { jobId: string }) {
                 `${f}=${w.total_bars} 根（${w.memory_type}${w.researcher_bars != null ? "，研究者設定" : ""}${w.transform?.type && w.transform.type !== "none" ? `，${w.transform.type}` : ""}）`).join("；")}</div>
             )}
             {tm.cascade && <div className="mx-muted">串接：{fmt(tm.cascade.policy)}，清除 {fmt(tm.cascade.purge_sec)} 秒，有樣本外預測 {tm.cascade.n_rows_with_oof} 列</div>}
-            {hd && <div className="mx-muted">Holdout：納入 {hd.n_included}、未成熟 {hd.n_unmatured}、輸入不足未預測 {hd.n_skipped} {fmt(hd.skipped_reasons)}；成熟截止 {fmt(hd.cutoff_ts)}</div>}
+            {hd && <div className="mx-muted">Holdout：納入 {hd.n_included}、不納入 {hd.n_excluded ?? hd.n_unmatured} {fmt(hd.excluded_reasons)}（其中未成熟 {hd.n_unmatured}）、輸入不足未預測 {hd.n_skipped} {fmt(hd.skipped_reasons)}；成熟截止 {fmt(hd.cutoff_ts)}</div>}
           </div>
         );
       })}
