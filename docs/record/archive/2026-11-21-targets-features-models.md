@@ -60,3 +60,10 @@ Dot 的評估請求（首次越界、區間高低點、價格位置／K 棒形�
 - 根目錄 `.gitignore`：`tmp/`、`output/`。
 - 測試檔改名 `test_targets_models.py`。
 - 一次 commit 全部未提交的變更（含 11-16 M2～M7、11-18 OOM 修正、今天）並 push；`backend/tmp_ind_full.json` 不收。
+
+## 部署（2026-11-21 14:35，Hermes 同意）
+- 部署前：pending／running 0 筆（done 145）；版本＝commit `618f43c`（已 push）；退版＝`backup/20261121/`（見 `backup/index.md`）。
+- `deploy.ps1` 完成，backend／training 重建。容器內 `engine_v2.py`、`seq_models.py`、`frame.py` md5 與本機相同。
+- 輕量檢查：architectures 清單含 gru／cnn_lstm／transformer；outcomes 含三個新目標；`job-summaries` 200；`POST /train` 不帶憑證 401；worker 取得鎖、等待 30 秒、回收 0 筆、開始輪詢。
+- 已知：robocopy 的 `/XD` 排除的資料夾不會被 `/MIR` 刪除，NAS 上仍留著舊的 `backend/tests`（不再更新，不影響訓練容器）。
+- 未做：MCP 小資料驗收（交由 MCP 端執行）。
