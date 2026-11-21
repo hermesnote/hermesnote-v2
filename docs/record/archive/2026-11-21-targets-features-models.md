@@ -67,3 +67,5 @@ Dot 的評估請求（首次越界、區間高低點、價格位置／K 棒形�
 - 輕量檢查：architectures 清單含 gru／cnn_lstm／transformer；outcomes 含三個新目標；`job-summaries` 200；`POST /train` 不帶憑證 401；worker 取得鎖、等待 30 秒、回收 0 筆、開始輪詢。
 - 已知：robocopy 的 `/XD` 排除的資料夾不會被 `/MIR` 刪除，NAS 上仍留著舊的 `backend/tests`（不再更新，不影響訓練容器）。
 - 未做：MCP 小資料驗收（交由 MCP 端執行）。
+
+- 部署後（Hermes 同意）：透過 SMB 刪除 NAS 上舊的 `backend/tests`（26 個舊測試檔，皆在 Git 內）。後端容器映像內仍有一份舊副本，下次部署重建時自然消失。
