@@ -75,3 +75,5 @@ Dot 的評估請求（首次越界、區間高低點、價格位置／K 棒形�
 - 修正：白名單加 `v2`；`res["v2"]` 多 `model_input_format`（`input_layout`／`legacy_single_branch`）與 `mask_branches`。模型、權重、訓練流程不變（harness ALL MATCH）。
 - 舊任務：`GET /api/model/jobs/{id}` 回應時用 `services/model_artifacts.backfill_v2` 從同任務 `model_artifacts`（model_config／preprocessing_state／graph_spec_snapshot／warmup_policy／history_requirements／fingerprint）唯讀推回，標 `backfilled`／`source`／`unknown`；不寫 DB、不重訓。
 - 測試：`V2SummaryTests` 4 項（API 回應補回、摘要保留、A 14 欄 cols [0,5]/[5,14]、B 5 欄單分支相容、產物推回與原值相同、來源矛盾時維持未知）；全部 332 項通過（skipped 15）。另以 MCP 指定的 A／B Phase 1 任務唯讀驗證：A dn 14 欄（u＝[5,14]，來源 model_config.input_layout）、B dn 5 欄（legacy_single_branch，來源 n_features＋graph_spec_snapshot）。
+- 部署（Hermes 同意，commit `92673fd`）：部署前 pending／running 0 筆；backend／training 重建，容器內 4 個改動檔 md5 與本機相同。線上 `GET /api/model/jobs/{id}`：A dn 14 欄（u＝[5,14]）、B dn 5 欄 legacy_single_branch、mask_branches＝["u"]，皆 backfilled；`job-summaries` 200；worker 取得鎖。退版＝`git checkout 24ab98e -- <改動檔>` 後重新部署。
+- 同次刪除 `backend/tmp_ind_full.json`（Hermes 同意；本機刪除，NAS 由部署同步移除）。
