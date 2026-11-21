@@ -39,6 +39,12 @@ def register(key: str, task_type: str | None = None):
 def validate_combination(outcome_key: str, labeling_rule_key: str) -> None:
     """檢查 outcome + labeling_rule 是不是合法組合，不合法直接丟例外（後端擋，不是只靠前端擋）。"""
     reason = ILLEGAL_COMBINATIONS.get(outcome_key, {}).get(labeling_rule_key)
+    from training.registry.outcomes import OUTCOME_CLASSES
+
+    if outcome_key in OUTCOME_CLASSES and labeling_rule_key not in CLASS_OUTCOME_RULES:
+        reason = f"{outcome_key} 是類別型目標，labeling_rule 請用 class_index"
+    elif outcome_key not in OUTCOME_CLASSES and labeling_rule_key in CLASS_OUTCOME_RULES:
+        reason = f"class_index 只適用類別型目標（{sorted(OUTCOME_CLASSES)}）"
     if reason:
         raise ValueError(f"不合法的組合：outcome={outcome_key!r} + labeling_rule={labeling_rule_key!r}：{reason}")
 
@@ -62,6 +68,23 @@ def fixed_threshold(raw: np.ndarray, valid_length: int, params: dict) -> tuple[n
     else:
         raise ValueError(f"fixed_threshold 只支援 n_classes=2 或 3，收到 {n_classes}")
     return y, "classification", {"n_classes": n_classes}
+
+
+@register("class_index", task_type="classification")
+def class_index(raw: np.ndarray, valid_length: int, params: dict) -> tuple[np.ndarray, str, dict]:
+    """類別型 outcome（例如 first_crossing）直接當類別索引，不再切門檻。params: n_classes（必須等於
+    outcome 宣告的類別數，提交時驗證）。"""
+    n_classes = int(params.get("n_classes", 2))
+    y = np.asarray(raw, dtype=float).copy()
+    y[valid_length:] = np.nan
+    ok = ~np.isnan(y)
+    if ok.any() and (y[ok].min() < 0 or y[ok].max() >= n_classes or np.any(y[ok] != np.round(y[ok]))):
+        raise ValueError(f"class_index：outcome 的值必須是 0～{n_classes - 1} 的整數")
+    return y, "classification", {"n_classes": n_classes}
+
+
+# 類別型 outcome 只能配 class_index；連續型 outcome 不能配 class_index（在 validate_combination 檢查）
+CLASS_OUTCOME_RULES = ("class_index",)
 
 
 @register("identity", task_type="regression")

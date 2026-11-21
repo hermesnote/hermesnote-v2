@@ -232,7 +232,7 @@
   <div class="yb-top">
     <section class="yb-profile" aria-label="一區 個人學經歷">
       <h1><span class="yb-name-primary">Hermes Yang</span> <span class="yb-name-local">(楊馥瑋)</span></h1>
-      <div><h2>學歷</h2><div class="yb-indent"><p>國立臺北教育大學 資訊科學系 碩士在職就讀中</p><p>中國文化大學 財務金融學系 學士</p></div></div>
+      <div><h2>學歷</h2><div class="yb-indent"><p>國立臺北教育大學 資訊科學系 碩士在職專班</p><p>中國文化大學 財務金融學系 學士</p></div></div>
       <div><h2>經歷</h2><div class="yb-indent"><p>緯致科技｜Java 軟體工程師</p><p>精進財商｜網站全端工程師</p><p>統一綜合證券｜財富管理顧問</p></div></div>
     </section>
     <section class="yb-region yb-history" aria-label="二區 1999至2017 靜態時間軸">
@@ -309,12 +309,12 @@
  [[root.querySelector('.yb-history .yb-years'),1999,2017],[root.querySelector('.yb-recent .yb-years'),2018,2026]].forEach(([el,start,end])=>{for(let year=start;year<=end;year++){const cell=document.createElement('div');cell.className='yb-year';cell.textContent=year;el.appendChild(cell);}});
  const tail=document.createElement('div');tail.className='yb-year yb-extension';tail.setAttribute('aria-label','2026 延伸留白');root.querySelector('.yb-recent .yb-years').appendChild(tail);
  const projects={
-  website:{title:'Hermesnote 網站與系統平台',context:'個人專案 / 研究網站',color:'#17365d',intro:'整合研究、模型實驗、量化回測與家庭記帳的共用平台。',tags:['研究網站','個人專案'],purpose:'Hermesnote 是個人研究網站，作為研究與應用的展示入口。',focus:'以網站全貌、代表功能與架構流程，串起平台的使用方式與實作內容。',slides:[['網站全貌','放入 Hermesnote 的首頁或主要操作畫面。'],['代表功能','放入最適合現場介紹的一個功能畫面。'],['架構流程','放入網站架構或資料流程圖。']]},
-  agent:{title:'Hermes Agent 研究協作與工具整合',context:'個人專案 / 研究系統',color:'#3434cf',intro:'以多代理分工推進研究，保留每一步的依據與決策。',tags:['Agent','研究系統','Research Orchestrator'],purpose:'Hermes Agent 的 Research Orchestrator 協助解釋需求與規劃系統建置。',focus:'展示一次研究任務，從提出需求、規劃工作，到交接執行的過程。',slides:[['系統全貌','放入 Hermes Agent 的主要介面。'],['任務範例','放入一組研究任務與回應的實際畫面。'],['協作流程','放入 Research Orchestrator 與其他工具的協作圖。']]},
-  'finance-agent':{title:'Family FP 家庭記帳 Agent',context:'個人專案 / 理財應用',color:'#f2c94c',intro:'從自然語言記帳建立家庭帳務與財務管理基礎。',tags:['Agent','理財應用'],purpose:'以獨立作品呈現理財 Agent 的實際用途。',focus:'挑選一個具代表性的使用情境，展示輸入、處理過程與輸出結果。',slides:[['應用畫面','放入理財 Agent 的主要介面。'],['使用情境','放入一個實際操作範例。'],['輸出結果','放入適合說明專案價值的成果畫面。']]},
-  forecast:{title:'臺指期時間序列預測模型應用研究',context:'研究 / 模型應用',color:'#897149',intro:'探討歷史行情與技術指標，能否提供可驗證的短期方向訊號。',tags:['金融時間序列','模型訓練','模型應用'],purpose:'研究所延伸的研究主題，將模型訓練與預測應用放在同一個脈絡中呈現。',focus:'依研究問題、實驗設計與結果解讀，說明模型如何連接實際應用。',slides:[['研究全貌','放入研究架構或整體流程圖。'],['實驗設計','放入模型、資料切分或實驗流程圖。'],['研究結果','放入確認可引用的實驗圖表與結果。']]},
-  php:{title:'WMPCCA 協會網站與營運系統',context:'工作經歷 / 精進財商',color:'#656aa3',intro:'整合會員、報名、金流、後台管理與線上測驗。',tags:['網站開發','全端工程'],purpose:'精進財商的網站全端工程師經歷。',focus:'先選一件代表作品，說明需求、實作範圍與交付結果；其他作品可再補入。',slides:[['代表作品','放入最適合介紹的網站主畫面。'],['功能操作','放入能說明個人貢獻的功能畫面。'],['實作流程','放入前後端串接或資料流程圖。']]},
-  java:{title:'進版流程自動化工具',context:'工作經歷 / 緯致科技',color:'#bf5510',intro:'台灣人壽新核心系統資料轉換專案的任務與版本流程整合。',tags:['Java','軟體開發'],purpose:'緯致科技的 Java 軟體工程師經歷。',focus:'挑選一個代表案例，說明原始需求、處理方式與實際改善。',slides:[['代表案例','放入適合介紹的系統或功能畫面。'],['處理流程','放入案例的操作或處理流程。'],['實作成果','放入能說明改善結果的圖表或畫面。']]}
+  website:{title:'Hermesnote 全端網站',context:'個人專案 / 研究網站',color:'#17365d',intro:'提供研究與日常應用的前後台操作介面及 AI API。',tags:['研究網站','個人專案'],purpose:'Hermesnote 是個人研究網站，作為研究與應用的展示入口。',focus:'以網站全貌、代表功能與架構流程，串起平台的使用方式與實作內容。',slides:[['網站全貌','放入 Hermesnote 的首頁或主要操作畫面。'],['代表功能','放入最適合現場介紹的一個功能畫面。'],['架構流程','放入網站架構或資料流程圖。']]},
+  agent:{title:'Hermes Agent 多代理研究協作',context:'個人專案 / 研究系統',color:'#3434cf',intro:'透過多代理分工，協助文獻查核、實驗設計與結果回顧。',tags:['Agent','研究系統','Research Orchestrator'],purpose:'Hermes Agent 的 Research Orchestrator 協助解釋需求與規劃系統建置。',focus:'展示一次研究任務，從提出需求、規劃工作，到交接執行的過程。',slides:[['系統全貌','放入 Hermes Agent 的主要介面。'],['任務範例','放入一組研究任務與回應的實際畫面。'],['協作流程','放入 Research Orchestrator 與其他工具的協作圖。']]},
+  'finance-agent':{title:'Family FP 家庭記帳理財 Agent',context:'個人專案 / 理財應用',color:'#f2c94c',intro:'透過自然語言記帳，整合家庭收支管理、財務分析與理財規劃。',tags:['Agent','理財應用'],purpose:'以獨立作品呈現理財 Agent 的實際用途。',focus:'挑選一個具代表性的使用情境，展示輸入、處理過程與輸出結果。',slides:[['應用畫面','放入理財 Agent 的主要介面。'],['使用情境','放入一個實際操作範例。'],['輸出結果','放入適合說明專案價值的成果畫面。']]},
+  forecast:{title:'臺指期時間序列預測研究',context:'研究 / 模型應用',color:'#897149',intro:'使用歷史行情與技術指標，檢驗模型對臺指期短期方向的預測能力。',tags:['金融時間序列','模型訓練','模型應用'],purpose:'研究所延伸的研究主題，將模型訓練與預測應用放在同一個脈絡中呈現。',focus:'依研究問題、實驗設計與結果解讀，說明模型如何連接實際應用。',slides:[['研究全貌','放入研究架構或整體流程圖。'],['實驗設計','放入模型、資料切分或實驗流程圖。'],['研究結果','放入確認可引用的實驗圖表與結果。']]},
+  php:{title:'WMPCCA 協會網站與管理系統',context:'工作經歷 / 精進財商',color:'#656aa3',intro:'整合會員、活動報名、金流與線上測驗，支援協會日常作業。',tags:['網站開發','全端工程'],purpose:'精進財商的網站全端工程師經歷。',focus:'先選一件代表作品，說明需求、實作範圍與交付結果；其他作品可再補入。',slides:[['代表作品','放入最適合介紹的網站主畫面。'],['功能操作','放入能說明個人貢獻的功能畫面。'],['實作流程','放入前後端串接或資料流程圖。']]},
+  java:{title:'進版流程自動化工具',context:'工作經歷 / 緯致科技',color:'#bf5510',intro:'整合任務查詢、腳本處理與版本提交，支援小組進版作業。',tags:['Java','軟體開發'],purpose:'緯致科技的 Java 軟體工程師經歷。',focus:'挑選一個代表案例，說明原始需求、處理方式與實際改善。',slides:[['代表案例','放入適合介紹的系統或功能畫面。'],['處理流程','放入案例的操作或處理流程。'],['實作成果','放入能說明改善結果的圖表或畫面。']]}
  };
  // Only confirmed technologies are listed. Replace empty fields as content is supplied.
  const detailContent={

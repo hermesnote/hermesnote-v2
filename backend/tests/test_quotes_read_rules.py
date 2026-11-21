@@ -13,6 +13,7 @@ from datetime import date
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BACKEND_DIR)
 
+import tests  # noqa: E402,F401 — 正式 hermesnote DB 防護（tests/__init__.py），必須在 training／services 之前
 import pandas as pd  # noqa: E402
 
 from services import quotes  # noqa: E402

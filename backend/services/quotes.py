@@ -81,7 +81,8 @@ def duplicate_details(values, label: str) -> list[str]:
         [f"……共 {len(counts)} 個重複時間"] if len(counts) > _DUP_DETAIL_LIMIT else [])
 
 
-async def fetch_ohlcv_dataframe(symbol: str, timeframe: str, start: date, end: date) -> "pd.DataFrame":
+async def fetch_ohlcv_dataframe(symbol: str, timeframe: str, start: date, end: date, *, lookback_bars: int = 0,
+                                load_from: date | None = None, with_session: bool = False) -> "pd.DataFrame":
     """跟 fetch_ohlcv_rows 撈同一份資料，但給訓練 worker 用——不繞「asyncpg Record → 兩百多萬個
     Python dict → pandas.DataFrame(list of dict)」這條路。1m 級時間框架（十幾年份、兩百多萬列）
     這樣繞，light 是慢，重則整個 process 被系統 OOM killer 砍掉（2026-09-11 實測復現：本機同一組
@@ -91,6 +92,12 @@ async def fetch_ohlcv_dataframe(symbol: str, timeframe: str, start: date, end: d
     自己攤成欄位陣列，中間不用先物化成一堆 dict 物件——這條路徑對百萬列等級的資料明顯更省記憶體。
 
     讀取規則見上方說明（排除 other、唯一性驗證、讀取報告）。
+
+    v2 圖（流程版本 2026-11-r2）另外使用：
+      lookback_bars  往 start 之前多載入幾根（暖機＋窗格；以實際 K 棒數計，排除 other 之後）
+      load_from      至少從這天開始載入（固定錨點轉換需要）
+      with_session   一併回傳 session、trading_day（交易時段曆、沿用前一時段判定用）
+    舊格式的圖不傳這些參數，行為與之前完全相同。
     """
     import pandas as pd
 
@@ -113,10 +120,34 @@ async def fetch_ohlcv_dataframe(symbol: str, timeframe: str, start: date, end: d
         kept = where + (" AND session IS DISTINCT FROM 'other'" if has_session else "")
         cols = ["datetime", "open", "high", "low", "close", "volume"] + [
             c for c in ("bar_end_ts", "bar_start_ts") if c in present]
+        if with_session:
+            cols += [c for c in ("session", "trading_day") if c in present]
+        period_start = start
+        lookback = None
+        if lookback_bars or load_from:
+            from datetime import datetime as _dtm, time as _tm
+
+            not_other = " AND session IS DISTINCT FROM 'other'" if has_session else ""
+            begin = _dtm.combine(start, _tm()) if not isinstance(start, _dtm) else start
+            found = None
+            if lookback_bars:
+                found = await conn.fetchval(
+                    f"SELECT datetime FROM {table} WHERE datetime < $1{not_other} ORDER BY datetime DESC OFFSET $2 LIMIT 1",
+                    begin, int(lookback_bars) - 1)
+                if found is None:
+                    found = await conn.fetchval(f"SELECT min(datetime) FROM {table} WHERE datetime < $1{not_other}", begin)
+            eff = min([x for x in (found, _dtm.combine(load_from, _tm()) if load_from else None, begin) if x is not None])
+            n_before = await conn.fetchval(
+                f"SELECT count(*) FROM {table} WHERE datetime >= $1 AND datetime < $2{not_other}", eff, begin)
+            lookback = {"requested_bars": int(lookback_bars), "loaded_bars": int(n_before), "load_from": str(eff),
+                        "anchor": str(load_from) if load_from else None,
+                        "shortfall": max(0, int(lookback_bars) - int(n_before))}
+            start = eff
         order = "bar_start_ts ASC, built_at ASC" if has_start else "datetime ASC, built_at ASC"
         rows = await conn.fetch(f"SELECT {', '.join(cols)} FROM {table} WHERE {kept} ORDER BY {order}", start, end)
 
-        report = {"table": table, "start": str(start), "end": str(end), "n_rows": len(rows),
+        report = {"table": table, "start": str(period_start), "end": str(end), "n_rows": len(rows),
+                  **({"lookback": lookback, "load_start": str(start)} if lookback else {}),
                   "order_key": "bar_start_ts" if has_start else "datetime",
                   "excluded_sessions": list(EXCLUDED_SESSIONS) if has_session else [],
                   "n_excluded": 0, "excluded_trading_days": []}

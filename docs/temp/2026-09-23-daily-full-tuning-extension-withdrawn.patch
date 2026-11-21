@@ -1,0 +1,604 @@
+--- a/training/registry/features.py (撤回前基準)
++++ b/training/registry/features.py (本輪擴充，已撤回)
+@@ -46,10 +46,87 @@
+     return _as_2d(df["volume"].to_numpy(dtype=float))
+ 
+ 
++_VALID_INPUT_FIELDS = ("open", "high", "low", "close", "volume")
++
++
++def _talib_function(name: str):
++    import talib.abstract as ta
++
++    try:
++        return ta.Function(name)
++    except Exception as e:  # TA-Lib 自己對不存在的名稱丟的例外訊息不一致，統一包裝成清楚的 ValueError
++        raise ValueError(f"TA-Lib 沒有這個指標：{name!r}（{e}）") from e
++
++
++def talib_overridable_field(name: str) -> str | None:
++    """這個 TA-Lib 指標唯一可覆寫的輸入角色名稱（例如 'price'），沒有可覆寫的角色就回 None。
++
++    只有「單一輸入角色、且該角色只對應一個欄位（不是欄位陣列）」的指標才能覆寫輸入欄位——
++    例如 BBANDS／ROC／MOM／MAX／MIN／STDDEV：`input_names == {'price': 'close'}`，這種預設
++    吃 close，可以覆寫成吃 volume（成交量 ROC）或 high／low（通道類指標）。BBANDS 雖然有三個
++    輸出（upperband/middleband/lowerband），但輸入角色只有一個 'price'，一樣可以覆寫。
++    像 ATR／STOCH／AD／ADX／MFI／SAR／AROON／OBV 這種一次固定吃好幾個欄位
++    （`input_names` 有多個角色，或某個角色對應的是欄位陣列，例如 OBV 的
++    `{'price': 'close', 'prices': ['volume']}`）本身角色跟欄位已經綁死，不支援覆寫。
++    官方各函式的輸入角色定義：https://ta-lib.github.io/ta-lib-python/func_groups/ （依 func group 分頁）。
++    """
++    names = _talib_function(name).input_names
++    if len(names) != 1:
++        return None
++    ((role, value),) = names.items()
++    return role if isinstance(value, str) else None
++
++
++def talib_output_width(name: str) -> int | None:
++    """這個 TA-Lib 指標的輸出欄數（例如 BBANDS 是 3、RSI 是 1），名稱不存在回 None。
++    只依函式 metadata 算，不用跑資料——給提交前驗證（欄位邊界檢查）用。
++    """
++    try:
++        return len(_talib_function(name).output_names)
++    except ValueError:
++        return None
++
++
++def validate_talib_indicator_params(params) -> list[str]:
++    """提交前驗證（只用 TA-Lib 函式 metadata，不吃資料），graph_refs.py 對 Feature 節點呼叫。"""
++    if params is None:
++        params = {}
++    if not isinstance(params, dict):
++        return [f"talib_indicator 的 params 必須是物件，收到 {type(params).__name__}"]
++    name = params.get("name")
++    if not name:
++        return ['talib_indicator 節點缺少 params.name（要指定指標名稱，例如 "RSI"）']
++    try:
++        overridable = talib_overridable_field(name)
++    except ValueError as e:
++        return [str(e)]
++    issues: list[str] = []
++    if "input" in params:
++        field = params["input"]
++        if field not in _VALID_INPUT_FIELDS:
++            issues.append(f"talib_indicator 的 params.input 必須是 {_VALID_INPUT_FIELDS} 之一，收到 {field!r}")
++        elif overridable is None:
++            names = dict(_talib_function(name).input_names)
++            issues.append(
++                f"talib_indicator：{name} 一次固定吃多個欄位（{names}），不支援用 params.input 覆寫，"
++                "只有單一輸入角色的指標（例如 BBANDS/ROC/MAX/MIN/STDDEV）才能覆寫"
++            )
++    return issues
++
++
+ @register("talib_indicator")
+ def talib_indicator(df, params: dict) -> np.ndarray:
+     """呼叫任一個 TA-Lib 指標。params 至少要有 "name"（例如 "RSI"），其餘 key 當該指標的參數
+     （例如 {"name": "RSI", "timeperiod": 14}）。用 TA-Lib 的 abstract API，不用為每個指標各寫一個函式。
++
++    可選 `params.input`（"open"/"high"/"low"/"close"/"volume" 之一）：覆寫這個指標「唯一輸入角色」
++    預設吃的欄位（TA-Lib 單輸入類指標預設一律吃 close），例如 `{"name":"ROC","input":"volume"}`
++    等於「成交量 ROC」，`{"name":"MAX","input":"high"}`／`{"name":"MIN","input":"low"}` 拼起來就是
++    Donchian 通道。只有單一輸入角色的指標支援覆寫（見 talib_overridable_field），不支援的指標
++    送這個欄位會在提交前就被擋下來（validate_talib_indicator_params），這裡只是同一份規則的
++    執行期防線。衍生指標一律吃這裡傳進來的原始欄位（df 本身沒被動過），跟任何 Model Node
++    層級的前處理（例如 winsorize）無關——這裡永遠是「截尾前」的原始值，見 graph.py 對
++    `params.winsorize` 的說明。
+     """
+     import talib.abstract as ta
+ 
+@@ -59,7 +136,8 @@
+         # graph_spec 略過前端表單——空字串丟進 ta.Function 會得到 TA-Lib 自己那句
+         # "not supported by TA-LIB."，完全看不出真正原因，這裡先擋下來講清楚。
+         raise ValueError('talib_indicator 節點缺少 params.name（要指定指標名稱，例如 "RSI"）')
+-    kwargs = {k: v for k, v in params.items() if k != "name"}
++    input_field = params.get("input")
++    kwargs = {k: v for k, v in params.items() if k not in ("name", "input")}
+     fn = ta.Function(name)
+     inputs = {
+         "open": df["open"].to_numpy(dtype=float),
+@@ -69,6 +147,13 @@
+         "volume": df["volume"].to_numpy(dtype=float),
+     }
+     fn.input_arrays = inputs
++    if input_field is not None:
++        overridable = talib_overridable_field(name)
++        if overridable is None:
++            raise ValueError(f"talib_indicator：{name} 不支援用 params.input 覆寫輸入欄位（一次固定吃多個欄位）")
++        if input_field not in _VALID_INPUT_FIELDS:
++            raise ValueError(f"talib_indicator 的 params.input 必須是 {_VALID_INPUT_FIELDS} 之一，收到 {input_field!r}")
++        fn.input_names = {overridable: input_field}
+     if kwargs:
+         # 前端表單一律用 <input type="number"> + Number()，JSON 序列化又不區分「剛好是整數
+         # 的浮點數」跟「整數」（2.0 跟 2 過一輪 JSON 都變成 2），到這裡就沒辦法從數字本身
+@@ -137,6 +222,163 @@
+     return np.stack(columns, axis=1)
+ 
+ 
++def _is_int_at_least(v, minimum) -> bool:
++    return not isinstance(v, bool) and isinstance(v, (int, float)) and float(v).is_integer() and v >= minimum
++
++
++@register("lagged_return_cum")
++def lagged_return_cum(df, params: dict | None = None) -> np.ndarray:
++    """N 期累積報酬（look-back，只用 t 及更早的資料，不是 Label 用的未來報酬）：
++    log(close[t] / close[t-n])——t 這根棒相對「n 根棒之前」的對數報酬。
++    跟 outcomes.py 的 log_return 公式相同、方向相反（那裡是 close[t+h] 相對 close[t]，這裡是
++    close[t] 相對 close[t-n]）——刻意不共用同一個函式，兩處語意不同，共用容易在改動時搞混方向。
++    params: {"n": 往回看幾根棒，預設 1，必須是 >= 1 的整數}。
++    """
++    n = (params or {}).get("n", 1)
++    if not _is_int_at_least(n, 1):
++        raise ValueError("lagged_return_cum 的 params.n 必須是 >= 1 的整數")
++    n = int(n)
++    close = df["close"].to_numpy(dtype=float)
++    out = np.full(len(close), np.nan)
++    if n < len(close):
++        out[n:] = np.log(close[n:] / close[:-n])
++    return _as_2d(out)
++
++
++@register("lagged_return")
++def lagged_return(df, params: dict | None = None) -> np.ndarray:
++    """單期對數報酬 r[t] = log(close[t]/close[t-1]) 向後位移 n 期：輸出 r[t-n]，不是 t 這根棒
++    自己的單期報酬（n=0 才是）。跟 lagged_return_cum（N 期累積報酬）不同：n=1 時兩者恰好相同，
++    n>1 時 lagged_return 仍然是「單期」報酬（只差一根棒），lagged_return_cum 是「N 根棒的
++    累積」報酬——這是研究草案要求刻意區分的兩種特徵，不能互相取代。
++    params: {"n": 位移幾根棒，預設 1，必須是 >= 0 的整數；0 等於 t 這根棒自己的單期報酬}。
++    """
++    n = (params or {}).get("n", 1)
++    if not _is_int_at_least(n, 0):
++        raise ValueError("lagged_return 的 params.n 必須是 >= 0 的整數")
++    n = int(n)
++    close = df["close"].to_numpy(dtype=float)
++    r1 = np.full(len(close), np.nan)
++    if len(close) > 1:
++        r1[1:] = np.log(close[1:] / close[:-1])
++    if n == 0:
++        out = r1
++    else:
++        out = np.full(len(close), np.nan)
++        if n < len(close):
++            out[n:] = r1[:-n]
++    return _as_2d(out)
++
++
++@register("rolling_return_std")
++def rolling_return_std(df, params: dict | None = None) -> np.ndarray:
++    """單期對數報酬 r[t] = log(close[t]/close[t-return_period]) 的滾動標準差，只用 t 及更早的資料。
++    params（皆需在提交前就明確給定，避免研究端跟平台對「報酬定義」或「樣本/母體標準差」有預設落差）：
++      "return_period"：算報酬用幾根棒的差，預設 1；
++      "window"：滾動視窗長度（必填，多少根報酬取一次標準差）；
++      "ddof"：0（母體標準差，NumPy／pandas 預設）或 1（樣本標準差），預設 0；
++      "min_periods"：視窗內至少要有幾筆報酬才算，預設等於 window（湊不滿一律 NaN，
++        不用比視窗長度短的資料算出可能失真的標準差）。
++    """
++    import pandas as pd
++
++    p = params or {}
++    if "window" not in p:
++        raise ValueError("rolling_return_std 缺少 params.window")
++    window, return_period = p["window"], p.get("return_period", 1)
++    ddof, min_periods = p.get("ddof", 0), p.get("min_periods", p["window"])
++    if not (_is_int_at_least(window, 1) and _is_int_at_least(return_period, 1) and _is_int_at_least(min_periods, 1)):
++        raise ValueError("rolling_return_std 的 window／return_period／min_periods 必須是 >= 1 的整數")
++    if ddof not in (0, 1):
++        raise ValueError("rolling_return_std 的 params.ddof 必須是 0 或 1")
++    window, return_period, min_periods = int(window), int(return_period), int(min_periods)
++    close = df["close"].to_numpy(dtype=float)
++    r = np.full(len(close), np.nan)
++    if return_period < len(close):
++        r[return_period:] = np.log(close[return_period:] / close[:-return_period])
++    out = pd.Series(r).rolling(window=window, min_periods=min_periods).std(ddof=int(ddof)).to_numpy()
++    return _as_2d(out)
++
++
++CALENDAR_COMPONENTS = ("dow_sin", "dow_cos", "month_sin", "month_cos")
++
++
++@register("calendar")
++def calendar(df, params: dict | None = None) -> np.ndarray:
++    """日期的週期編碼，直接從資料本身的時間索引算，不接任何外部資料源。
++    口徑：用資料庫存的 naive datetime（等同交易所本地時間，訓練/推論全程不做時區轉換）；
++    星期用 weekday()（Mon=0…Sun=6，實務上只會出現 0-4，因為只有交易日有資料）、月份用 1-12
++    算 sin/cos 週期編碼；不做假日或半日市調整（那需要交易日曆，這裡沒有這份資料）。
++    params: {"components": 要輸出哪幾個、依這個順序輸出，預設全部四個（見 CALENDAR_COMPONENTS）}。
++    """
++    comps = (params or {}).get("components") or list(CALENDAR_COMPONENTS)
++    if not isinstance(comps, list) or not comps or any(c not in CALENDAR_COMPONENTS for c in comps):
++        raise ValueError(f"calendar 的 params.components 只能是 {CALENDAR_COMPONENTS} 的非空子集合，收到 {comps!r}")
++    dow = df.index.weekday.to_numpy(dtype=float)
++    month = df.index.month.to_numpy(dtype=float)
++    values = {
++        "dow_sin": np.sin(2 * np.pi * dow / 7), "dow_cos": np.cos(2 * np.pi * dow / 7),
++        "month_sin": np.sin(2 * np.pi * (month - 1) / 12), "month_cos": np.cos(2 * np.pi * (month - 1) / 12),
++    }
++    return np.stack([values[c] for c in comps], axis=1)
++
++
++def validate_feature_params(key: str, params) -> list[str]:
++    """提交前驗證（不吃資料），graph_refs.py 對每個 Feature 節點呼叫。只有下面登記規則的 key
++    會被擋；沒登記規則的 key（ohlcv/raw_price/raw_volume/quant_saved_strategy）維持現況，
++    交給執行期驗證，不是這裡漏做。"""
++    if key == "talib_indicator":
++        return validate_talib_indicator_params(params)
++    if params is not None and not isinstance(params, dict):
++        return [f"{key} 節點的 params 必須是物件，收到 {type(params).__name__}"]
++    p = params or {}
++    if key == "lagged_return_cum" and "n" in p and not _is_int_at_least(p["n"], 1):
++        return ["lagged_return_cum 的 params.n 必須是 >= 1 的整數"]
++    if key == "lagged_return" and "n" in p and not _is_int_at_least(p["n"], 0):
++        return ["lagged_return 的 params.n 必須是 >= 0 的整數"]
++    if key == "rolling_return_std":
++        issues = []
++        if "window" not in p:
++            issues.append("rolling_return_std 缺少 params.window")
++        elif not _is_int_at_least(p["window"], 1):
++            issues.append("rolling_return_std 的 params.window 必須是 >= 1 的整數")
++        if "return_period" in p and not _is_int_at_least(p["return_period"], 1):
++            issues.append("rolling_return_std 的 params.return_period 必須是 >= 1 的整數")
++        if "ddof" in p and p["ddof"] not in (0, 1):
++            issues.append("rolling_return_std 的 params.ddof 必須是 0 或 1")
++        if "min_periods" in p and not _is_int_at_least(p["min_periods"], 1):
++            issues.append("rolling_return_std 的 params.min_periods 必須是 >= 1 的整數")
++        return issues
++    if key == "calendar" and "components" in p:
++        comps = p["components"]
++        if not isinstance(comps, list) or not comps or any(c not in CALENDAR_COMPONENTS for c in comps):
++            return [f"calendar 的 params.components 只能是 {CALENDAR_COMPONENTS} 的非空子集合"]
++    return []
++
++
++def feature_output_width(key: str, params) -> int | None:
++    """這個 Feature 節點（依 key＋params）輸出的欄數，只依 metadata／固定規則算，不吃資料；
++    算不出來（例如 quant_saved_strategy 要查 DB 才知道有幾棵樹）回 None——呼叫端（欄位邊界
++    的提交前驗證）遇到 None 要放棄靜態檢查，不能當作 0 或任何猜測值。
++    """
++    p = params if isinstance(params, dict) else {}
++    if key == "ohlcv":
++        return 5
++    if key == "raw_price":
++        return 4
++    if key == "raw_volume":
++        return 1
++    if key in ("lagged_return_cum", "lagged_return", "rolling_return_std"):
++        return 1
++    if key == "calendar":
++        comps = p.get("components") or list(CALENDAR_COMPONENTS)
++        return len(comps) if isinstance(comps, list) else None
++    if key == "talib_indicator":
++        name = p.get("name")
++        return talib_output_width(name) if name else None
++    return None
++
++
+ def list_available() -> list[dict]:
+     """給 GET /api/model/registry/features 用，Swagger 自動文件化，Agent/MCP 查詢用。"""
+     return [{"key": k, "description": (fn.__doc__ or "").strip()} for k, fn in FEATURE_REGISTRY.items()]
+--- a/services/quotes.py (撤回前基準)
++++ b/services/quotes.py (本輪擴充，已撤回)
+@@ -29,6 +29,59 @@
+     return f"market.future_taifex_{symbol.lower()}_{timeframe}"
+ 
+ 
++async def _existing_columns(conn, table: str, candidates: list[str]) -> dict[str, bool]:
++    """這張表實際有哪些候選欄位（schema 層級、對整張表一致，不是逐列判斷）。
++    表名已過 quotes_table 白名單；這裡再把 schema／表名拆開用參數綁定查 information_schema，
++    不是把整個表名字串塞進條件式。"""
++    schema, _, name = table.partition(".")
++    rows = await conn.fetch(
++        "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 "
++        "AND column_name = ANY($3)",
++        schema, name, candidates,
++    )
++    present = {r["column_name"] for r in rows}
++    return {c: c in present for c in candidates}
++
++
++# 唯讀稽核用的候選欄位：資訊可用時間（bar_end_ts）與合約／換月證據（contract_month／
++# rule_version／contract_rank，contract_rank 只有 contract_* 這種一天多列的合約表才有）。
++_METADATA_CANDIDATES = ["bar_end_ts", "contract_month", "rule_version", "contract_rank"]
++
++
++async def fetch_metadata_rows(symbol: str, timeframe: str, start: date, end: date) -> dict:
++    """唯讀：把資料表裡實際存在的「資訊可用時間」與「合約／換月」欄位交出去給稽核／研究端核對用
++    ——這不是訓練或特徵計算的路徑（那條路是 fetch_ohlcv_dataframe／fetch_ohlcv_rows，不受影響），
++    純粹讓外部能看到 DB 裡實際有什麼證據，不用另外 SSH 進 NAS 查。
++
++    缺欄位不是拿 null 混進每一列資料裡假裝有這欄，是在 `columns_present` 明講這張表本身
++    有沒有這個欄位（整張表一致的 schema 事實）；表沒有的欄位，`rows` 裡直接不會出現那個 key，
++    不用逐列猜「這裡的 null 是本來就沒資料，還是這欄根本不存在」。
++    """
++    table = quotes_table(symbol, timeframe)
++    conn = await asyncpg.connect(QUOTES_DATABASE_URL)
++    try:
++        present = await _existing_columns(conn, table, _METADATA_CANDIDATES)
++        cols = ["datetime"] + [c for c in _METADATA_CANDIDATES if present[c]]
++        rows = await conn.fetch(
++            f"SELECT {', '.join(cols)} FROM {table} WHERE datetime >= $1 AND datetime < $2 "
++            "ORDER BY datetime ASC, built_at ASC",
++            start, end,
++        )
++    finally:
++        await conn.close()
++
++    out_rows = []
++    for r in rows:
++        row = {"datetime": int(r["datetime"].timestamp())}
++        for c in _METADATA_CANDIDATES:
++            if not present[c]:
++                continue
++            v = r[c]
++            row[c] = int(v.timestamp()) if c == "bar_end_ts" and v is not None else v
++        out_rows.append(row)
++    return {"table": table, "columns_present": present, "rows": out_rows}
++
++
+ async def fetch_ohlcv_rows(symbol: str, timeframe: str, start: date, end: date) -> list[dict]:
+     table = quotes_table(symbol, timeframe)
+     conn = await asyncpg.connect(QUOTES_DATABASE_URL)
+--- a/training/graph_refs.py (撤回前基準)
++++ b/training/graph_refs.py (本輪擴充，已撤回)
+@@ -110,8 +110,12 @@
+     return out
+ 
+ 
++_SPLIT_STRATEGIES = ("random", "chronological", "date_range")
++
++
+ def _node_field_issues(nid: str, node: dict) -> list[str]:
+-    """Model Node 本身的欄位型別（window／val_ratio／output_mode），graph.py 會直接轉型使用。"""
++    """Model Node 本身的欄位型別（window／val_ratio／output_mode／split_strategy／
++    date_range 的 val_start／val_end／params.winsorize 的結構），graph.py 會直接轉型使用。"""
+     out: list[str] = []
+     if "window" in node and not _int_at_least(node["window"], 1):
+         out.append(f"Model 節點 {nid}：window 必須是大於等於 1 的整數，收到 {node['window']!r}")
+@@ -119,9 +123,98 @@
+         out.append(f"Model 節點 {nid}：val_ratio 必須是 0 到 1 之間（不含）的數值，收到 {node['val_ratio']!r}")
+     if node.get("output_mode") is not None and not isinstance(node["output_mode"], str):
+         out.append(f"Model 節點 {nid}：output_mode 必須是字串，收到 {node['output_mode']!r}")
++
++    strategy = node.get("split_strategy", "random")
++    if strategy not in _SPLIT_STRATEGIES:
++        out.append(f"Model 節點 {nid}：split_strategy 必須是 {_SPLIT_STRATEGIES} 之一，收到 {strategy!r}")
++    elif strategy == "date_range":
++        # 依明確日期＋target 時間切分（見 training/graph.py）：train 是 target 時間 < val_start
++        # 的樣本，validation 是 [val_start, val_end) 的樣本，val_end 之後的資料整批排除。
++        vs, ve = node.get("val_start"), node.get("val_end")
++        if not isinstance(vs, str) or not isinstance(ve, str):
++            out.append(f"Model 節點 {nid}：split_strategy=date_range 需要字串型的 val_start／val_end（YYYY-MM-DD）")
++        else:
++            import datetime as _dt
++
++            try:
++                d1, d2 = _dt.date.fromisoformat(vs), _dt.date.fromisoformat(ve)
++            except ValueError:
++                out.append(f"Model 節點 {nid}：val_start／val_end 必須是合法的 YYYY-MM-DD 日期，收到 {vs!r}／{ve!r}")
++            else:
++                if d1.isoformat() != vs or d2.isoformat() != ve:
++                    out.append(f"Model 節點 {nid}：val_start／val_end 必須是標準 YYYY-MM-DD 格式，收到 {vs!r}／{ve!r}")
++                elif d1 >= d2:
++                    out.append(f"Model 節點 {nid}：val_start（{vs}）必須早於 val_end（{ve}）")
++
++    params = node.get("params")
++    winsorize = params.get("winsorize") if isinstance(params, dict) else None
++    if winsorize is not None:
++        if not isinstance(winsorize, list) or not winsorize:
++            out.append(f"Model 節點 {nid}：params.winsorize 必須是非空陣列")
++        else:
++            for i, item in enumerate(winsorize):
++                label = f"Model 節點 {nid}：params.winsorize[{i}]"
++                if not isinstance(item, dict) or set(item) - {"column", "lower_pct", "upper_pct"}:
++                    out.append(f"{label} 只能有 column／lower_pct／upper_pct 三個鍵，且必須是物件")
++                    continue
++                if not _int_at_least(item.get("column"), 0):
++                    out.append(f"{label}.column 必須是 >= 0 的整數（串接後的欄位索引，0-based）")
++                lo, hi = item.get("lower_pct"), item.get("upper_pct")
++                if not (_finite_number(lo) and 0 <= lo < 50):
++                    out.append(f"{label}.lower_pct 必須是 [0, 50) 的數值")
++                if not (_finite_number(hi) and 50 < hi <= 100):
++                    out.append(f"{label}.upper_pct 必須是 (50, 100] 的數值")
+     return out
+ 
+ 
++def _feature_issues(nid: str, node: dict) -> list[str]:
++    """Feature Node 的 key 與 params 驗證（提交前，不吃資料）。"""
++    from training.registry import features
++
++    key = node.get("key")
++    if not isinstance(key, str) or key not in features.FEATURE_REGISTRY:
++        return [f"Feature 節點 {nid}：未登記的 feature key {key!r}，目前有：{sorted(features.FEATURE_REGISTRY)}"]
++    return [f"Feature 節點 {nid}：{msg}" for msg in features.validate_feature_params(key, node.get("params"))]
++
++
++def _winsorize_column_issues(nid: str, node: dict, nodes: dict, model_specs: dict) -> list[str]:
++    """params.winsorize 的 column 索引是否落在這個節點串接後的實際總欄數內；只在能靜態算出
++    全部輸入寬度時才檢查（任何一段算不出來——例如 quant_saved_strategy、或引用了不存在的
++    節點/輸出——就放棄檢查，不猜；那些情況別的驗證已經會報錯或執行期會報錯）。"""
++    from training.registry import features
++
++    params = node.get("params")
++    winsorize = params.get("winsorize") if isinstance(params, dict) else None
++    if not isinstance(winsorize, list) or not winsorize:
++        return []
++    total = 0
++    for ref in input_refs(node):
++        target = nodes.get(ref.node)
++        if target is None:
++            return []
++        if target["type"] == "feature":
++            width = features.feature_output_width(target.get("key"), target.get("params"))
++        elif target["type"] == "model":
++            spec = model_specs.get(ref.node, {}).get(ref.output)
++            width = spec.get("columns") if isinstance(spec, dict) else None
++        else:
++            return []
++        if width is None:
++            return []
++        total += width
++    issues = []
++    for i, item in enumerate(winsorize):
++        col = item.get("column") if isinstance(item, dict) else None
++        if _int_at_least(col, 0) and int(col) < total:
++            continue
++        if _int_at_least(col, 0):
++            issues.append(
++                f"Model 節點 {nid}：params.winsorize[{i}].column={int(col)} 超出範圍"
++                f"（這個節點串接後總共有 {total} 欄，索引範圍 0～{total - 1}）"
++            )
++    return issues
++
++
+ def validate_graph_spec(graph_spec: dict) -> None:
+     """提交前／執行前的完整驗證，失敗丟 GraphValidationError（含全部問題）。
+ 
+@@ -147,6 +240,10 @@
+         if n["type"] not in ("feature", "label", "model"):
+             issues.append(f"節點 {n['id']}：未知的節點類型 {n['type']!r}")
+ 
++    for nid, n in nodes.items():
++        if n["type"] == "feature":
++            issues.extend(_feature_issues(nid, n))
++
+     label_task_types: dict = {}
+     for nid, n in nodes.items():
+         if n["type"] != "label":
+@@ -197,6 +294,10 @@
+             except Exception as e:  # noqa: BLE001 — 描述函式（含各 architecture 自己的）任何意外都要回報成驗證問題，不能讓提交流程 500／worker 崩潰
+                 issues.append(f"Model 節點 {nid} 的輸出描述失敗（{type(e).__name__}）：{e}")
+ 
++    for nid, n in nodes.items():
++        if n["type"] == "model":
++            issues.extend(_winsorize_column_issues(nid, n, nodes, model_specs))
++
+     edges: dict = {nid: [] for nid in nodes}
+     for nid, n in nodes.items():
+         if n["type"] != "model":
+--- a/training/graph.py (撤回前基準)
++++ b/training/graph.py (本輪擴充，已撤回)
+@@ -266,6 +266,8 @@
+             val_ratio = float(node.get("val_ratio", 0.2))
+             val_size = max(1, int(n_samples * val_ratio))
+             n_excluded_boundary = 0
++            n_excluded_after_val_end = None  # 只有 date_range 模式才有這個概念
++            date_range_bounds = None
+ 
+             if split_strategy == "chronological":
+                 # Phase 2：不隨機打亂，val 固定是時間上最後一段；訓練樣本裡只要「標籤成熟時間」
+@@ -277,6 +279,26 @@
+                 boundary_ok = label_end_ts[candidate_train_idx] < val_start_ts
+                 train_idx = candidate_train_idx[boundary_ok]
+                 n_excluded_boundary = int((~boundary_ok).sum())
++            elif split_strategy == "date_range":
++                # 依明確日期＋target 時間切分：train＝target（標籤成熟）時間 < val_start 的樣本，
++                # val＝落在 [val_start, val_end) 的樣本，val_end 之後的資料整批排除（不進 train 也
++                # 不進 val）。用「target 時間 < val_start」定義 train，本身就已經排除了跨界樣本
++                # （只要標籤成熟時間 >= val_start，不論決策時間在哪，一律不算 train），跟
++                # chronological 那組另外算 boundary_ok 是同一個規則、不同的表達方式，
++                # n_excluded_boundary 這裡固定是 0，改用 n_excluded_after_val_end 記錄「太晚」
++                # 被排除的筆數，供 HA 核對實際分區跟排除量。
++                val_start_ts = np.datetime64(pd.Timestamp(node["val_start"]).to_pydatetime())
++                val_end_ts = np.datetime64(pd.Timestamp(node["val_end"]).to_pydatetime())
++                val_idx = np.flatnonzero((label_end_ts >= val_start_ts) & (label_end_ts < val_end_ts))
++                train_idx = np.flatnonzero(label_end_ts < val_start_ts)
++                n_excluded_after_val_end = int((label_end_ts >= val_end_ts).sum())
++                date_range_bounds = {
++                    "val_start_requested": node["val_start"], "val_end_requested": node["val_end"],
++                    "val_start_actual": to_unix(val_start_ts) if len(val_idx) else None,
++                    "val_end_actual": to_unix(label_end_ts[val_idx[-1]]) if len(val_idx) else None,
++                }
++                if len(val_idx) == 0:
++                    raise ValueError(f"節點 {nid}：date_range 切分在 [val_start, val_end) 內沒有任何樣本，確認日期範圍是否對到實際資料")
+             else:
+                 # Phase 1：隨機打亂切分（現有行為，保留不變，這是既有實驗結果的重現基準）。
+                 rng = np.random.default_rng(42)
+@@ -284,7 +306,7 @@
+                 val_idx, train_idx = idx[:val_size], idx[val_size:]
+ 
+             if len(train_idx) == 0:
+-                raise ValueError(f"節點 {nid}：{split_strategy} 切分後訓練樣本數為 0（可能是 val_ratio 太大或 horizon 太長導致邊界排除掉太多樣本）")
++                raise ValueError(f"節點 {nid}：{split_strategy} 切分後訓練樣本數為 0（可能是 val_ratio 太大、val_start 太早或 horizon 太長導致邊界排除掉太多樣本）")
+ 
+             # 每一列預測值屬於 train／val／unused（因邊界排除而沒被用在訓練或驗證任何一邊）
+             # 哪個來源，逐列標記，不是整個節點貼一個籠統的標籤——這是三方對齊時 Codex 特別要求的
+@@ -308,14 +330,42 @@
+             np.add.at(coverage, train_idx, 1)
+             np.add.at(coverage, train_idx + window, -1)
+             train_row_mask = np.cumsum(coverage[:-1]) > 0
+-            feat_min = X_raw[train_row_mask].min(axis=0)
+-            feat_max = X_raw[train_row_mask].max(axis=0)
++
++            # 成交量（或任一指定欄位）截尾（winsorize，可選，train-only fit，順序在 MinMax 之前）：
++            # 只用「有被至少一個訓練窗格用到」的原始列（跟上面 MinMax 同一個 train_row_mask）算
++            # 百分位門檻，套用到全部列（含 val），跟 MinMax 一樣不讓 val 的分布洩漏進門檻。
++            # column 是「串接後」的欄位索引（inputs 的原始順序，跟 window/inference 一致）。
++            # 只對這裡明確指定的欄位截尾——TA-Lib 衍生指標（例如用 params.input="volume" 算出來
++            # 的 VROC、或任何吃 volume 的指標）是各自的 Feature Node 直接對「未截尾」的原始 df
++            # 算出來的，跟這裡的欄位截尾互不影響：截尾只發生在這個 Model Node 把各路特徵串接
++            # 成 X_raw 之後、對指定的那一欄做 clip，不會回頭改任何 Feature Node 自己的輸出，
++            # 也不會讓同一份原始量值「先截尾再算指標」——如果研究端要「指標吃截尾後的量」，
++            # 現在的做法做不到，需要另外設計（例如讓截尾變成 Feature Node 本身的一個轉換層），
++            # 這不是本輪範圍，如實記錄成限制。
++            winsorize_cfg = (node.get("params") or {}).get("winsorize") or []
++            X_for_scaling = X_raw
++            winsorize_state = []
++            if winsorize_cfg:
++                X_for_scaling = X_raw.copy()
++                for item in winsorize_cfg:
++                    col = int(item["column"])
++                    train_vals = X_raw[train_row_mask, col]
++                    lower = float(np.percentile(train_vals, item["lower_pct"]))
++                    upper = float(np.percentile(train_vals, item["upper_pct"]))
++                    X_for_scaling[:, col] = np.clip(X_for_scaling[:, col], lower, upper)
++                    winsorize_state.append({
++                        "column": col, "lower_pct": float(item["lower_pct"]), "upper_pct": float(item["upper_pct"]),
++                        "lower": lower, "upper": upper,
++                    })
++
++            feat_min = X_for_scaling[train_row_mask].min(axis=0)
++            feat_max = X_for_scaling[train_row_mask].max(axis=0)
+             feat_scale = np.where(feat_max > feat_min, feat_max - feat_min, 1.0)
+ 
+             # 正規化跟轉 float32（省一半記憶體）都在展開窗格之前做，窗格化只是用
+             # sliding_window_view 開一個 view，不搬資料；真正的記憶體只在下面
+             # X[train_idx]/X[val_idx] 那一刻，為了各自需要的那個子集才分配。
+-            X_raw_norm = ((X_raw - feat_min) / feat_scale).astype(np.float32, copy=False)
++            X_raw_norm = ((X_for_scaling - feat_min) / feat_scale).astype(np.float32, copy=False)
+             X = np.moveaxis(np.lib.stride_tricks.sliding_window_view(X_raw_norm, window_shape=window, axis=0), -1, 1)
+             X = X[:-1]  # 最後一個窗格會涵蓋到 common_ts 的最後一列，跟原本迴圈版本一樣刻意排除
+ 
+@@ -410,6 +460,10 @@
+                 "split_strategy": split_strategy,
+                 "n_train": len(train_idx), "n_val": len(val_idx),
+                 "n_excluded_boundary": n_excluded_boundary,
++                "n_excluded_after_val_end": n_excluded_after_val_end,
++                # date_range 模式才有值：實際核准請求的日期 vs 資料裡真正落到的邊界，供 HA 核對
++                # 「送出的日期」跟「實際切到的樣本範圍」是否一致（交易日不一定剛好落在請求的日期上）。
++                "date_range": date_range_bounds,
+                 "preprocessing": "minmax",
+                 # 樣本 ts = 輸入最後一根棒的識別時間（棒起點）；available_ts 有值代表預覽／推論
+                 # 另外帶了資訊可用時間（見 training/time_semantics.py）
+@@ -420,6 +474,7 @@
+             model_result["prediction_source"] = prediction_source.tolist()
+             model_result["preprocessing_state"] = {
+                 "method": "minmax", "min": feat_min.tolist(), "scale": feat_scale.tolist(),
++                "winsorize": winsorize_state,
+             }
+             # 具名輸出的 metadata：依這個節點的實際設定描述（含 Outcome／單位／horizon／事件規則），
+             # 存進 model_config 跟著模型產物走（推論載入時據此驗證下游引用的輸出）、也放進 job 摘要。
+--- a/training/inference.py (撤回前基準)
++++ b/training/inference.py (本輪擴充，已撤回)
+@@ -94,6 +94,12 @@
+     # 在窗格化「之前」對 X_raw（形狀只有 n×特徵數）做，數學上跟窗格化後再做完全等價
+     # （逐元素線性變換），但完全不用碰窗格化後的大陣列——跟 graph.py 訓練時同一個道理。
+     preprocessing_state = artifact.get("preprocessing_state") or {"method": "none"}
++    # 截尾一律在 MinMax 之前套用，跟訓練時（graph.py）同一個順序；門檻是訓練當下 train-only fit
++    # 存下來的固定值，這裡只是 clip，不重新算百分位。舊產物沒有這個 key，`.get(...) or []` 視為
++    # 沒有截尾，行為跟這個功能加進來之前完全一樣。
++    for item in preprocessing_state.get("winsorize") or []:
++        col = item["column"]
++        X_raw[:, col] = np.clip(X_raw[:, col], item["lower"], item["upper"])
+     if preprocessing_state.get("method") == "minmax":
+         feat_min = np.asarray(preprocessing_state["min"])
+         feat_scale = np.asarray(preprocessing_state["scale"])

@@ -27,14 +27,12 @@
 
 後端目前用什麼位址對 Agent 開放（container 內部網路 / 宿主機 IP / 檔案系統直接存取）還沒確定，這份文件先不假設，Agent 自己判斷連得到哪個位址就用哪個。本機開發時後端跑在 `http://localhost:8000`（僅供同機測試參考，不保證是 Agent 實際能用的位址）。
 
-## 認證方式（2026-09-17 對照程式碼確認）
+## 認證方式（2026-11-16 更新，對照程式碼）
 
-**這個資料夾底下涵蓋的所有端點——`indicators.md`／`backtest/`／`training/` 三份文件列的每一支，讀跟寫（含 `POST /api/model/train`、`/infer`、`POST /api/backtest/strategy` 這類會建立真實任務的端點）——目前都沒有掛任何認證檢查**，查證方式：`grep` 整個 `backend/routers/`，只有 `GET /api/auth/me`（後台網頁自己登入狀態查詢用，跟這份文件無關）有 `Depends(get_current_user)`，其餘全部端點完全沒有 auth dependency。
-
-也就是說：
-- 不是「唯讀 API 不帶 token、寫入 API 需要專用憑證還沒驗證」——**唯讀跟送任務的端點是同一套（沒有）認證狀態**，程式碼裡目前根本不存在「Agent 專用憑證」這個機制，不是還沒驗證，是還沒有。
-- 現在的存取控制**完全依賴網路層**（哪些網段/容器連得到 backend 這個位址），不是應用層驗證身分。Hermes Agent 容器能連進來查 `health`／`registry`／`openapi.json`，用同一個網路路徑理論上就能直接打 `POST /api/model/train`，程式面不會擋。
-- 如果之後要開放給更廣泛的來源、或提交端點要留稽核軌跡（誰送的、什麼時候送的），需要另外設計一層憑證機制（例如 API key 或沿用現有的 JWT），這是要不要做、什麼時候做的產品決策，不是這份文件能自己定案的——先誠實記在這裡，等三方對齊後再決定。
+- **模型 API 的寫入端點要求認證**（`/api/model/*` 的 POST／PATCH／DELETE，共 12 個；細節、權限範圍與錯誤碼見 [training/api.md](training/api.md) 的「認證」一節）。Agent／MCP 用服務金鑰標頭 `X-Hermesnote-Key`；後台網頁用管理員登入的 session JWT。
+- **讀取端點仍不需要認證**：所有 GET（`health`、`registry`、`jobs`、結果、逐筆紀錄…）與 WebSocket 進度串流。
+- **回測（`/api/backtest/*`）與指標端點目前仍沒有認證**，包含 `POST /api/backtest/strategy` 這類會建立任務的端點；它們的存取控制仍只靠網路層，另案處理。
+- 金鑰明文只存在呼叫端的執行環境；網站後端 `.env` 只保存 SHA-256 雜湊。
 
 ## 基本流程（以回測為例）
 

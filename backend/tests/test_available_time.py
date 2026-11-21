@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
+import tests  # noqa: E402,F401 — 正式 hermesnote DB 防護（tests/__init__.py），必須在 training／services 之前
 from services import quotes  # noqa: E402
 from tests import contract_harness as H  # noqa: E402
 from tests.test_lstm_dual import KEY, params  # noqa: E402

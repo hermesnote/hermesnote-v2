@@ -20,12 +20,23 @@ OUTCOME_REGISTRY: dict = {}
 OUTCOME_META: dict = {}
 
 
-def register(key: str, unit: str | None = None, signed: bool = False):
+def register(key: str, unit: str | None = None, signed: bool = False, *, gap_check: bool = False,
+             v2_only: bool = False, classes=None):
+    """gap_check：v2 圖預設對 T～T+H 做缺格檢查（見 engine_v2.Ctx.labels，Label params.gaps 可覆寫）；
+    v2_only：只能用在 mode=v2 的圖（缺格檢查需要 v2 的 K 棒時間）；
+    classes：`(params) -> [類別名稱…]`，類別型目標宣告類別順序（索引＝位置），寫進輸出說明。"""
     def deco(fn):
         OUTCOME_REGISTRY[key] = fn
-        OUTCOME_META[key] = {"unit": unit, "signed": signed}
+        OUTCOME_META[key] = {"unit": unit, "signed": signed, "gap_check": gap_check, "v2_only": v2_only}
+        if classes is not None:
+            OUTCOME_CLASSES[key] = classes
         return fn
     return deco
+
+
+OUTCOME_CLASSES: dict = {}
+# outcome key → (df, params) -> {原因代碼: 布林遮罩}：該 outcome 自己的起點條件（engine_v2.label_exclusions 套用）
+OUTCOME_EXCLUSIONS: dict = {}
 
 
 def _future_close(df, horizon: int):
@@ -64,6 +75,87 @@ def future_price(df, params: dict) -> tuple[np.ndarray, int]:
     horizon = int(params.get("horizon", 1))
     _, future, n = _future_close(df, horizon)
     return future, n - horizon
+
+
+# ── 2026-11-21：首次越界、區間最高／最低 ─────────────────────────────────────
+def _horizon(params: dict) -> int:
+    return int(params.get("horizon", 1))
+
+
+def _future_block(x: np.ndarray, horizon: int) -> np.ndarray:
+    """(n, H)：第 t 列是 x[t+1..t+H]；超出尾端為 NaN。"""
+    n = len(x)
+    out = np.full((n, horizon), np.nan)
+    for k in range(1, horizon + 1):
+        out[: max(n - k, 0), k - 1] = x[k:]
+    return out
+
+
+def first_crossing_classes(params: dict) -> list[str]:
+    h = _horizon(params)
+    return [f"up_{k}" for k in range(1, h + 1)] + [f"down_{k}" for k in range(1, h + 1)] + ["none"]
+
+
+@register("first_crossing", unit="class", gap_check=True, v2_only=True, classes=first_crossing_classes)
+def first_crossing(df, params: dict) -> tuple[np.ndarray, int]:
+    """首次越界（類別）：以 T 收完時已知的上界／下界（params.bounds，見 training/registry/bounds.py），
+    看 T+1～T+H 每根收盤第一次穿越哪一側、在第幾根。收盤 > 上界＝上穿、< 下界＝下穿，恰好等於仍算區間內。
+    類別索引：0～H-1＝上穿第 1～H 根、H～2H-1＝下穿第 1～H 根、2H＝期限內未越界（共 2H+1 類，
+    Label 的 labeling_rule 用 class_index、n_classes＝2H+1）。T 的上下界是 NaN（暖機）或期末不足 H 根時沒有答案。
+    params: horizon、bounds。"""
+    from training.registry import bounds as bd
+
+    h = _horizon(params)
+    upper, lower = bd.compute(df, params["bounds"])
+    close = df["close"].to_numpy(dtype=float)
+    fut = _future_block(close, h)
+    up = fut > upper[:, None]
+    down = fut < lower[:, None]
+    n = len(close)
+    raw = np.full(n, float(2 * h))
+    decided = np.zeros(n, dtype=bool)
+    for k in range(h):
+        hit_up = up[:, k] & ~decided
+        hit_down = down[:, k] & ~decided
+        raw[hit_up] = k
+        raw[hit_down] = h + k
+        decided |= hit_up | hit_down
+    raw[np.isnan(upper) | np.isnan(lower)] = np.nan
+    raw[max(n - h, 0):] = np.nan
+    return raw, n - h
+
+
+def _start_outside(df, params: dict) -> dict:
+    """first_crossing 的起點條件：T 收盤必須在上下界之內或恰在線上，否則排除（label_start_outside）。"""
+    from training.registry import bounds as bd
+
+    upper, lower = bd.compute(df, params["bounds"])
+    close = df["close"].to_numpy(dtype=float)
+    with np.errstate(invalid="ignore"):
+        return {"label_start_outside": (close > upper) | (close < lower)}
+
+
+OUTCOME_EXCLUSIONS["first_crossing"] = _start_outside
+
+
+@register("future_high_offset", unit="percent", signed=True, gap_check=True, v2_only=True)
+def future_high_offset(df, params: dict) -> tuple[np.ndarray, int]:
+    """區間最高（回歸，百分比）：100 × (max(High[T+1..T+H]) / Close[T] − 1)，不含 T、保留正負號。params: horizon。"""
+    h = _horizon(params)
+    close = df["close"].to_numpy(dtype=float)
+    raw = 100.0 * (_future_block(df["high"].to_numpy(dtype=float), h).max(axis=1) / close - 1.0)
+    raw[max(len(close) - h, 0):] = np.nan
+    return raw, len(close) - h
+
+
+@register("future_low_offset", unit="percent", signed=True, gap_check=True, v2_only=True)
+def future_low_offset(df, params: dict) -> tuple[np.ndarray, int]:
+    """區間最低（回歸，百分比）：100 × (min(Low[T+1..T+H]) / Close[T] − 1)，不含 T、保留正負號。params: horizon。"""
+    h = _horizon(params)
+    close = df["close"].to_numpy(dtype=float)
+    raw = 100.0 * (_future_block(df["low"].to_numpy(dtype=float), h).min(axis=1) / close - 1.0)
+    raw[max(len(close) - h, 0):] = np.nan
+    return raw, len(close) - h
 
 
 def list_available() -> list[dict]:

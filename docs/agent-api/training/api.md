@@ -13,7 +13,39 @@
 | `null`（舊） | 2026-11 以前 | — |
 | `2026-11-r1`（M1） | 2026-11-15 | ① `POST /train`、`POST /infer` 回應多 `warnings`；② `GET /jobs`、`GET /jobs/{id}` 多 `pipeline_version`、`warnings`，單筆另有 `data_report`、`env_fingerprint`；③ 跨時間框架的圖回 400（M4 前暫不開放）；④ 讀到重複 K 棒時任務 `failed`（不再靜默去重）；⑤ 分鐘資料讀取排除 `session='other'` |
 
-後續里程碑（M2 暖機與樣本框架、M3 Phase 3 評估與逐筆紀錄、M4 跨時間框架對齊、M5 串接防洩漏、M6 多分支、M7 前端）上線時，會在這張表加一列並更新下方對應章節。**MCP 端請以這張表判斷要同步哪些欄位**；欄位的即時定義仍以 `GET /api/model/registry/*` 與實際回應為準。
+| `2026-11-r2`（M2～M7） | 2026-11-16 | ⓪ **寫入端點需要認證**（401／403，見「認證」）；① 新圖格式 `mode: "v2"`（樣本框架、往前取暖機、轉換元件、跨時間框架 as-of、多分支、串接 OOF），見「v2 圖與實驗層」；**舊格式的圖行為與 r1 逐位元組相同**，但帶 v2 專用欄位（`settings`、`warmup`、`transform`、`branches`、`upstream_policy`、`normalization`）會 400；② **Phase 3（`POST /infer` + `phase: 3`）改成 best、last 都推論並評估**，`result[node]` 多 `evaluations`（`dataset.split="holdout"`）、`metric_specs`、`holdout`；③ 新端點：實驗層 `/api/model/experiments…`、逐筆結果 `/jobs/{id}/records`、`/jobs/{id}/evaluations`、`/jobs/{id}/holdout_usage`、`/jobs/{id}/upstream_folds`、`/jobs/{id}/cascade_audit`、`/warmup/suggest`、`/registry/v2`；④ `GET /jobs`、`/jobs/{id}` 多 `experiment_id`、`arm_id`、`frame_id`、`model_seed`、`split_seed`、`gate_check`、`requested_by`（舊任務皆 `null`）；⑤ 新訓練的 `result[node]` 多 `train_stats`（v2 另有 `training_meta.frame／exclusions／warmup／branches／cascade`）；⑥ 舊格式的 Phase 1→2→3 血緣規則不變 |
+
+| `2026-11-r2` 增補（尚未部署） | — | 只新增、不改既有結果（流程版本不升）：新目標 `first_crossing`／`future_high_offset`／`future_low_offset`（百分比）、labeling_rule `class_index`、Label `params.gaps`／`cross_session` 與排除原因 `label_gap`／`label_cross_session`／`label_start_outside`；分支 `role: "mask"` 與 `training_meta.sample_sets`；特徵 `candle_parts`／`price_position`；評估多 `brier`、`log_loss`；`upstream_policy.save_oof` 與逐筆結果 `dataset=upstream_oof`；模型 `gru`／`cnn_lstm`／`transformer`。見「新目標、特徵、模型（2026-11-21）」 |
+
+M2～M7 以同一個流程版本 `2026-11-r2` 交付（一次遷移、一次部署）。**MCP 端請以這張表判斷要同步哪些欄位**；欄位的即時定義仍以 `GET /api/model/registry/*` 與實際回應為準。
+
+### 認證（2026-11-16 起，寫入端點必須帶）
+
+`/api/model/*` 的**寫入端點**只接受下面兩種身分其一；**讀取（GET）與 WebSocket 不需要認證**。驗證失敗時在建立任何資料之前就回錯，不會產生任務。
+
+| 身分 | 標頭 | 給誰 | 權限範圍 |
+|---|---|---|---|
+| 服務金鑰 | `X-Hermesnote-Key: hnk_…` | MCP 等程式 | 依金鑰設定（見下表），**只給需要的範圍** |
+| 管理員 | `Authorization: Bearer <session JWT>` | 後台網頁（Google 登入＋email 白名單，12 小時到期） | 全部 |
+
+| 權限範圍 | 端點 |
+|---|---|
+| `model:train` | `POST /api/model/train` |
+| `model:infer` | `POST /api/model/infer` |
+| `model:manage` | `DELETE /api/model/jobs/{id}`、`POST /api/model/jobs/{id}/cancel`、`POST /api/model/artifacts/{job}/{node}/keep` |
+| `model:experiment` | `POST /experiments`、`PATCH /experiments/{id}/settings`、`POST /experiments/{id}/arms`、`POST /experiments/{id}/frames`、`POST /experiments/{id}/arms/{arm}/run`、`POST /warmup/suggest`、`POST /registry/v2/feature_memory` |
+
+| 情況 | 回應 |
+|---|---|
+| 兩種都沒帶、金鑰錯、JWT 偽造／過期／格式錯 | **401**（`detail` 說明，不會建立任務） |
+| 帶了金鑰就只看金鑰：金鑰錯時**不會**改用同時帶的 JWT | 401 |
+| 金鑰正確但沒有該權限範圍 | **403** `服務金鑰 <名稱> 沒有 <範圍> 權限` |
+| JWT 有效但 email 不在白名單 | 403 |
+
+- 通過後後端記錄身分：任務 `requested_by`（`key:<金鑰名稱>`／`admin:<email>`，舊任務為 `null`，`GET /jobs`、`/jobs/{id}` 回傳）、實驗 `created_by`、設定修改紀錄 `settings.history[].by`、holdout 使用紀錄 `detail.requested_by`。
+- 門檻放行的**確認人由後端依驗證身分記錄**（`gate_check.override.confirmed_by`）；請求裡的 `gate_override.confirmed_by` 改為選填，只當備註存在 `note_confirmed_by`。
+- 金鑰設定（網站後端 `.env`）：`MODEL_API_KEYS=[{"name": "mcp-training", "sha256": "<金鑰明文的 SHA-256 hex>", "scopes": ["model:train"]}]`。後端只存雜湊；格式錯的項目會被略過並記錄錯誤（不印出內容）。輪替：加入新金鑰 → 呼叫端換新 → 移除舊項目，每次修改需重啟網站後端容器。
+- **MCP 需要的變更**：所有會呼叫上述寫入端點的工具（目前為 `submit_training` → `POST /train`）在 HTTP 請求加 `X-Hermesnote-Key`；金鑰放 MCP 執行環境，不寫進程式、log 或回應。401／403 應原樣回報給呼叫者，不要重送（`request_id` 防重送規則不變）。讀取工具不用改。
 
 ### 錯誤與失敗（呼叫端怎麼判斷）
 
@@ -28,6 +60,16 @@
 | 該期間查無資料 | 任務 `status: "failed"` | `error`：`這段期間查無資料` |
 | 行情有重複 K 棒 | 任務 `status: "failed"` | `error`：`market.future_taifex_tx_… 在 … 有重複 K 棒（已排除 session='other'）：bar_start_ts=… 出現 2 次；…`（最多列 20 筆）。研究期間（2026 年以前）實測沒有重複；2026 年資料有已知的重複夜盤 |
 | 驗證通過但執行時失敗（例如 OOM 以外的例外） | 任務 `status: "failed"` | `error` 是例外訊息 |
+| v2 圖不合法（暖機、轉換、分支、上游策略、settings） | HTTP 400，不建立任務 | 例：`Feature 節點 o：累積型指標必須選擇 transform（…）`、`Feature 節點 a：… 請設定 warmup.bars`、`Model 節點 m 分支 hour：… 必須在 aggregate 指定彙總方式` |
+| 舊格式的圖帶 v2 專用欄位 | HTTP 400 | `節點 r：warmup 只在 mode="v2" 的圖有效；…` |
+| 寫入端點沒帶憑證／憑證無效 | HTTP **401**，不建立任務 | 見上方「認證」 |
+| 服務金鑰沒有該權限範圍 | HTTP **403**，不建立任務 | `服務金鑰 <名稱> 沒有 <範圍> 權限` |
+| 實驗：門檻未通過 | HTTP **409**，不建立任務 | `detail: {"message": "...", "gate_check": {...}}`；附 `gate_override: {"reason": "..."}` 重送即建立，放行紀錄寫進任務 `gate_check.override`（確認人＝驗證身分） |
+| 實驗：修改建立後不可改的設定（期間、Label、切分…） | HTTP 400 | `detail` 列出可修改的鍵 |
+| 實驗：配對比較的兩個任務流程版本／框架版本／對齊設定不同 | HTTP 400 | 「系統拒絕跨版本比較」 |
+| v2：框架內可用的訓練點或驗證點為 0 | 任務 `failed` | `error`：`節點 m：框架內可用的訓練點 0、驗證點 …（排除原因：{…}）` |
+| v2 實驗：保存的框架雜湊與依資料重建的不同 | 任務 `failed` | `error`：`樣本框架 … 的雜湊與這次依資料重建的不同 … 請建立新版本框架` |
+| v2：排除比例超過門檻（預設 5%） | 任務 `done` | `warnings` 多 `{"code": "exclusion_ratio_high"}`；另有 `upstream_in_sample`（上游用舊行為）、`cumulative_load_dependent`（legacy_cumulative） |
 
 ## 流程總覽（訓練）
 
@@ -540,6 +582,10 @@ cm = pick(r, "default", "best")["metrics"]["confusion_matrix"]["values"]
 
 列出最近的任務（新到舊）。每筆含 `pipeline_version`、`warnings`（不含 `data_report`／`env_fingerprint` 全文，要看請查單筆）。
 
+## `GET /api/model/job-summaries?limit=1000`
+
+輕量任務清單（2026-11-18 起；訓練頁下拉選單用）：`[{job_id, job_type, status, created_at}]`，新到舊，`limit` 1～5000（預設 1000）。不含圖、結果與資料紀錄，一百多筆也只有十幾 KB；要完整內容請查單筆。
+
 ## `GET /api/model/jobs/{job_id}`
 
 ```json
@@ -582,7 +628,8 @@ cm = pick(r, "default", "best")["metrics"]["confusion_matrix"]["values"]
 |---|---|---|
 | `pipeline_version` | 建立時（web）；開始執行時以 worker 的版本覆寫 | 流程版本，見「版本與變更」 |
 | `warnings` | 建立時；讀完資料後以 `data_report.warnings` 為準 | 只提示、不擋任務 |
-| `env_fingerprint` | 開始執行時 | 實際執行環境的套件／CUDA／GPU／TA-Lib C 版本 |
+| `env_fingerprint` | 開始執行時 | 實際執行環境的套件／CUDA／GPU／TA-Lib C 版本；另有 `worker`（認領這筆任務的 worker 程序：`instance` 每次啟動不同、`pid`、`host`、`name`、`started_at`），用於中斷後回收，舊任務沒有 |
+| `data_report.resources` | 任務結束時（成功或失敗；被系統終止則沒有） | worker 程序峰值記憶體：`peak_rss_bytes`／`peak_rss_gib`（`VmHWM`），`scope` 為 `this_job`（每筆開始時歸零）或 `process_lifetime`（無法歸零時） |
 | `data_report` | 讀完資料、訓練開始前（訓練失敗的任務也查得到） | 每個時間框架讀到什麼、排除了什麼。`n_excluded`：排除的 `session='other'` 列數；`n_gaps`：同一交易日同一時段內相鄰 K 棒間隔超過一個週期的次數；`n_missing_bars`：缺的 K 棒總數（**只統計，不補棒，也不擋訓練**）；日線表沒有 `n_gaps`；`available_time`：目前的資訊可用時間假設（發布延遲 0 秒為未實測假設） |
 
 `status`：`pending`／`running`／`done`／`failed`（看 `error`）。worker 同時間只跑一筆；`pending` 表示還在排隊，或 GPU 實際可用顯存不足預留量（`TRAINING_GPU_MIN_FREE_MB`，預設 4096MiB，已先釋放 worker 自己的快取才判斷）而每 30 秒重試——延後原因（total／used／free、worker 自身佔用、門檻）記在 training 容器 log（`docker logs hermesnote-training`），API 不回傳。`result` 的 key 是每個 Model Node 的 `id`；`job_type='infer'` 的 job，`result[node_id]` 改成 `{"count": N, "start_ts": unix秒, "end_ts": unix秒}`（推論結果本身不在這裡，見下方 `/inference_predictions`）。
@@ -594,6 +641,11 @@ cm = pick(r, "default", "best")["metrics"]["confusion_matrix"]["values"]
 ## `POST /api/model/jobs/{job_id}/cancel`
 
 把一筆 `pending`/`running` 的任務標記成 `failed`（人工中斷）。**只改 DB 狀態，不會真的砍掉背景 process**——worker 是單一長駐行程、同時間只跑一個 job，沒有子行程可以單獨終止，真的要中斷運算需要重啟整個 training 容器（NAS 端操作，這支 API 沒有權限做）。呼叫這支的目的只是讓歷史紀錄立刻反映「已放棄」，不用等重啟才發現它其實已經死了。
+
+**狀態規則（2026-11-18 起）**：
+- worker 只認領 `pending` 的任務（原子操作），已取消的 `pending` 不會再被執行。
+- 執行中被取消的任務：worker 的每一筆寫入（進度、預覽、讀取報告、模型產物、推論結果、樣本框架、逐筆結果、評估、holdout 使用紀錄、串接折次、完成狀態）都會先確認任務仍是 `running` 且屬於自己，所以取消後的下一次寫入（通常是下一個 epoch 的進度）就會中止訓練、不再寫入任何資料，狀態維持取消時的 `failed`（舊版會跑完並改回 `done`）。取消前已寫出的資料保留。
+- worker 中斷（程序被終止、容器重啟）時任務會停在 `running`；下一個 worker 實例取得單一實例鎖後，把「有 `env_fingerprint.worker`、且不是自己認領」的 `running` 改成 `failed`，`error` 以「worker 中斷，原因未判定」開頭並記原實例 ID。沒有 `env_fingerprint.worker` 的舊任務不會自動回收。
 
 ## `GET /api/model/jobs/{job_id}/progress`
 
@@ -642,7 +694,40 @@ cm = pick(r, "default", "best")["metrics"]["confusion_matrix"]["values"]
 { "target_job_id": "<Phase 2 job_id>", "start": "2025-01-02", "end": "2026-01-01", "phase": 3, "use_weights": "best" }
 ```
 
-回應 `{ "job_id": "...", "warnings": [] }`；建立的任務 `job_type: "infer"`、`phase: 3`、`parent_job_id` 為該 Phase 2。目前 Phase 3 只產生逐列推論結果（下一支）；**對答案與評估指標（Phase 3 評估、逐筆結果）在 M3 上線**，屆時本節會補上評估結果格式。
+回應 `{ "job_id": "...", "warnings": [] }`；建立的任務 `job_type: "infer"`、`phase: 3`、`parent_job_id` 為該 Phase 2；同時寫一筆 holdout 使用紀錄（`kind: "inference"`）。
+
+**Phase 3 的執行內容（`2026-11-r2` 起）**：
+1. 逐列推論照舊寫進 `model_inference_predictions`（用 `use_weights` 那組），`/inference_predictions` 讀法不變，MCP 現有讀法不受影響。
+2. **best 與 last 兩組權重都推論**，各自依產物裡的答案定義（Label 的 outcome／labeling_rule／horizon）對答案、用與訓練相同的評估函式評估；尾端答案尚未成熟的時間點照常預測與保存，但**不納入評估**（`label_unmatured`）。
+3. 逐筆結果寫進 `model_prediction_records`（`dataset: "holdout"`，best、last 各一列），評估寫進 `model_evaluations`，並寫一筆 holdout 使用紀錄（`kind: "evaluation"`）。測試期間可以重跑，每次都記錄，不限次數。
+4. v2 產物：依產物保存的歷史需求**往 `start` 之前載入暖機資料**，測試期間第一根就有預測；輸入不足的時間點不預測，記原因（`holdout.skipped_reasons`）。舊格式產物：推論沿用舊路徑（期間開頭的暖機時間點照舊輸出）；舊產物沒有保存訓練集統計時，基準標示無法計算；舊格式的雙頭模型不做 Phase 3 評估（舊推論路徑只回回歸值）。
+
+**Phase 3 完成後的 `GET /jobs/{job_id}`（節錄）**：
+
+```json
+{
+  "job_type": "infer", "phase": 3, "status": "done", "pipeline_version": "2026-11-r2",
+  "result": {
+    "m": {
+      "count": 5124, "start_ts": 1735779600, "end_ts": 1767159000, "use_weights": "best",
+      "holdout": {"n_points": 5124, "n_predicted": 5124, "n_included": 5123, "n_unmatured": 1, "n_skipped": 0,
+                  "skipped_reasons": {}, "cutoff_ts": "2025-12-31 13:45:00", "baseline_stats": "train_stats"},
+      "metric_specs": {"...": "同訓練任務"},
+      "evaluations": [
+        {"id": "m/default/holdout/best", "model_node": "m", "head": "default",
+         "dataset": {"split": "holdout", "label": "Holdout", "phase": 3, "n_samples": 5123, "n_unmatured": 1,
+                     "n_skipped": 0, "task_data_range": {"start": "2025-01-02", "end": "2026-01-01"}, "description": "..."},
+         "point": {"kind": "best", "weights": "best", "label": "最佳權重（best）"},
+         "metrics": {"accuracy": 0.51, "balanced_accuracy": 0.50, "macro_f1": 0.49, "roc_auc": 0.51},
+         "unavailable": {}, "baselines": [{"key": "majority_class", "available": true, "metrics": {"accuracy": 0.52}}]},
+        {"id": "m/default/holdout/last", "...": "同上，point.kind=last"}
+      ]
+    }
+  }
+}
+```
+
+數值只是格式示意。`evaluations` 的格式與訓練任務相同（同一套指標鍵與 `metric_specs`），只差 `dataset.split="holdout"`、`point.kind` 是權重。`GET /jobs/{id}/evaluations` 回同一份內容（每組權重一列，含 `n_included`、`excluded_reasons`、`cutoff_ts`）。
 
 ## `GET /api/model/jobs/{job_id}/inference_predictions?node_id=...&start=...&end=...&cursor=...&limit=1000`
 
@@ -677,12 +762,233 @@ cm = pick(r, "default", "best")["metrics"]["confusion_matrix"]["values"]
 - `seed` 在 payload 裡，隨設定一起重送；Phase 1 的隨機切分種子固定。CPU 上同設定重跑的指標一致（有測試）；GPU 上不保證逐位相同，只保證設定相同。
 - Phase 2 要求母任務仍存在且已完成；母任務被刪除就不能重跑 Phase 2。Phase 3 要求來源 Phase 2 的模型產物仍在，且 `start` 仍須晚於該 Phase 1/2 訓練期間的結束日（不合會回 400）。
 
+## v2 圖與實驗層（`2026-11-r2`，M2～M7）
+
+### 兩種用法
+
+| 用法 | 入口 | 適合 |
+|---|---|---|
+| 直接送 v2 圖 | `POST /api/model/train`，`graph_spec` 加 `"mode": "v2"` | 單次實驗、MCP 直接提交。樣本框架在任務內建立（不保存時間點，雜湊記在結果） |
+| 實驗層 | `POST /api/model/experiments` → `.../arms` → `.../arms/{arm}/run` | 多組別公平比較：共同樣本框架（保存、可版本化）、模型種子清單、階段門檻、配對比較、holdout 使用紀錄 |
+
+Phase 2 仍用 `POST /train` + `phase: 2` + `parent_job_id`（v2 母任務會繼承 `mode`／`settings`，只把切分改成 chronological）；Phase 3 仍用 `POST /infer` + `phase: 3`。
+
+### v2 圖格式
+
+```json
+{
+  "mode": "v2",
+  "start": "2016-01-01", "end": "2024-01-01",
+  "settings": {
+    "split_seed": 42, "val_ratio": 0.2,
+    "warmup": {"epsilon": 0.01},
+    "exclusion_warn_ratio": 0.05,
+    "alignment": {"allow_previous_session": true, "max_sessions_back": 1, "max_age_sec": null,
+                  "delays": {"tx_60m": {"sec": 0, "status": "assumed", "note": ""}}},
+    "cascade": {"strategy": "forward_chaining", "k": 5, "final": "refit_full"}
+  },
+  "nodes": [
+    {"id": "f", "type": "feature", "key": "ohlcv", "timeframe": "tx_15m"},
+    {"id": "r", "type": "feature", "key": "talib_indicator", "timeframe": "tx_15m", "params": {"name": "RSI", "timeperiod": 14}},
+    {"id": "o", "type": "feature", "key": "talib_indicator", "timeframe": "tx_15m", "params": {"name": "OBV"},
+     "transform": {"type": "rolling_sum", "window": 20}},
+    {"id": "a", "type": "feature", "key": "talib_indicator", "timeframe": "tx_60m", "params": {"name": "ADX", "timeperiod": 14},
+     "warmup": {"bars": 120}},
+    {"id": "v1", "type": "feature", "key": "raw_volume", "timeframe": "tx_1m"},
+    {"id": "l60", "type": "label", "timeframe": "tx_60m", "outcome": "log_return", "labeling_rule": "fixed_threshold",
+     "params": {"horizon": 1, "n_classes": 2}},
+    {"id": "up", "type": "model", "key": "xgboost", "inputs": ["a"], "label": "l60", "window": 10, "output_mode": "probability",
+     "params": {"n_estimators": 200, "max_depth": 4, "learning_rate": 0.05, "early_stopping": {"patience": 20}, "seed": 42},
+     "upstream_policy": {"strategy": "forward_chaining", "k": 5, "final": "refit_full", "extra_purge_sec": 0}},
+    {"id": "l", "type": "label", "timeframe": "tx_15m", "outcome": "log_return", "labeling_rule": "fixed_threshold",
+     "params": {"horizon": 1, "n_classes": 2}},
+    {"id": "m", "type": "model", "key": "lstm", "inputs": ["f", "r", "o", "v1", "a", "up"], "label": "l", "params": {"...": "LSTM 參數"},
+     "branches": [
+       {"id": "main", "inputs": ["f", "r", "o", "v1"], "window": 60, "aggregate": {"v1": "sum"}},
+       {"id": "hour", "inputs": ["a", "up"], "window": 8, "encoder": "lstm"}
+     ]}
+  ]
+}
+```
+
+| 欄位 | 規則 |
+|---|---|
+| 決策時間框架 | ＝最終 Model Node 的 Label 時間框架。樣本＝這個時間框架在 `[start, end)` 的每一根 K 棒（以 `bar_start_ts` 識別），決策時刻＝該 K 棒 `bar_end_ts`＋延遲 |
+| `settings.split_seed`／`val_ratio` | 實驗層切分（只做一次，所有組別共用）。Phase 1 random；Phase 2 chronological（答案 K 棒跨進驗證起點的訓練點排除 `boundary`） |
+| Feature `warmup.bars` | 研究者設定的暖機（從資料載入起點算），只能比程式基本值長。**composite／unknown 必填**；查基本值：`POST /registry/v2/feature_memory`，實測建議：`POST /warmup/suggest` |
+| Feature `transform` | `none`／`diff`／`pct_return`／`log_return`／`rolling_sum`（`window`）／`fixed_anchor`（`anchor` 日期）／`legacy_cumulative`。**累積型（OBV、AD）必填**，只能用 diff／rolling_sum／fixed_anchor／legacy_cumulative |
+| 往前載入 | worker 依暖機＋窗格＋上游需求，自動往 `start` 之前多載入（`data_report.history_requirements`、各時間框架 `lookback`）；推論同一規則 |
+| Model `branches` | 不給＝一個 `main` 分支（`inputs`、`window`，時間框架＝決策時間框架）。分支的 `inputs` 合起來必須剛好等於節點 `inputs`。`encoder`：LSTM 用 `lstm`（預設）或 `last_value`；XGBoost 用 `flatten`（預設）或 `last_value`（window 固定 1）；`normalization`：目前只有 `[{"method": "global_minmax"}]`（預設） |
+| 跨時間框架 | 分支內較粗的特徵／上游預測：as-of（取可用時間 ≤ 該根分支 K 棒可用時間的最後一根）；較細的特徵：必須在分支 `aggregate` 指定 `last／mean／sum／std／max／min`（只用完全落在分支 K 棒內且已收完的子 K 棒） |
+| `alignment` | `allow_previous_session`（預設 true）、`max_sessions_back`（預設 1，0～5，`null`＝不限）、`max_age_sec`（預設 `null`）：套在每個分支最後一根可用 K 棒與 as-of 值上，超過就該時間點不產生樣本（`stale_branch`）。`delays`：依「資料表×時間框架」設定，預設 0 秒 `assumed` |
+| `upstream_policy` | 被下游使用的上游模型：`forward_chaining`（預設，K=5）／`purged_kfold`／`blending`／`in_sample`（舊行為，任務帶 `upstream_in_sample` 提示）；`final`：`refit_full`（預設）／`last_fold`；`extra_purge_sec` 只能加長自動清除範圍 |
+
+**排除原因代碼**（`GET /registry/v2` 的 `exclusion_reasons`）：`label_unavailable`、`label_unmatured`、`boundary`、`insufficient_history`、`warmup_not_ready`、`stale_branch`、`missing_availability`、`upstream_unavailable`、`upstream_purged`、`outside_frame`、`mapped_excluded`。
+
+**v2 訓練結果新增欄位**（`result[node]`）：`train_stats`；`training_meta.pipeline: "v2"`、`frame {hash, counts}`、`exclusions {train, val, frame}`、`exclusion_ratio`、`warmup {特徵: {memory_type, base_bars, researcher_bars, bars, transform, total_bars}}`、`branches {分支: {timeframe, window, encoder, n_from_previous_session, max_sessions_back, max_age_sec, median_age_sec}}`、`cascade {policy, purge_sec, n_folds, …}`（上游）、`evaluation_dataset`；最終節點另有 `frame`（完整摘要）與 `n_prediction_records`。`evaluations` 格式不變（`dataset.split: "val"`）。
+
+### 實驗層端點
+
+**建立實驗** `POST /api/model/experiments`
+
+```json
+{"name": "15m RSI vs RSI+1h ADX", "description": "…",
+ "settings": {
+   "start": "2016-01-01", "end": "2024-01-01", "holdout": {"start": "2024-01-01", "end": "2026-01-01"},
+   "label": {"timeframe": "tx_15m", "outcome": "log_return", "labeling_rule": "fixed_threshold", "params": {"horizon": 1, "n_classes": 2}},
+   "split_seed": 42, "val_ratio": 0.2, "warmup": {"epsilon": 0.01}, "exclusion_warn_ratio": 0.05,
+   "alignment": {"allow_previous_session": true, "max_sessions_back": 1, "max_age_sec": null, "delays": {}},
+   "cascade": {"strategy": "forward_chaining", "k": 5, "final": "refit_full"},
+   "gates": [{"phase": 2, "metric": "macro_f1", "op": ">=", "value": 0.5, "weights": "best", "head": "default"}]}}
+```
+
+回應 `{"experiment_id": "…", "warnings": [...], "pipeline_version": "2026-11-r2"}`。`holdout.start` 不能早於 `end`。
+
+| 端點 | 用途 |
+|---|---|
+| `GET /experiments`、`GET /experiments/{id}` | 清單；單筆含 `arms`、`frames`（phase、version、status、hash、counts）、`jobs` |
+| `PATCH /experiments/{id}/settings` `{"settings": {...}, "note": "…"}` | 只能改 `alignment`、`gates`、`exclusion_warn_ratio`、`warmup`、`cascade`（影響之後的任務；修改紀錄存在 `settings.history`） |
+| `POST /experiments/{id}/arms` `{"name", "nodes": [Feature／Model…], "model_seeds": [42, 43]}` | 組別。最終模型的 `label` 必須是 `"label"`（實驗注入）；模型種子覆寫每個 Model Node 的 `params.seed` |
+| `POST /experiments/{id}/arms/{arm_id}/run` `{"phase": 1}` | Phase 1：每個種子一筆任務 |
+| 同上 `{"phase": 2, "parent_job_ids": null, "gate_override": null}` | Phase 2：預設每筆已完成的 Phase 1 一對一銜接；先檢查門檻，未過回 409，附 `gate_override: {"reason"}` 放行（確認人由後端依驗證身分記錄） |
+| 同上 `{"phase": 3}` | Phase 3：每筆已完成的 Phase 2 一筆 infer 任務（期間＝`settings.holdout`），best／last 都評估 |
+| `POST /experiments/{id}/frames` `{"phase": 1, "note": "…"}` | 建立新版本框架（舊結果保留；跨版本比較會被拒絕） |
+| `GET /frames/{frame_id}/points?status=&cursor=&limit=` | 框架時間點（ts、決策時刻、答案時間、狀態、原因） |
+| `GET /experiments/{id}/compare?job_a=&job_b=&weights=best` | 配對比較（共同時間點）。分類：各自 accuracy、只有 A／B 答對數、McNemar 精確 p；回歸：各自 MSE、平方誤差差的配對 t。Phase 3 的比較寫 holdout 使用紀錄 |
+| `GET /experiments/{id}/holdout_usage` | holdout 使用紀錄（inference／evaluation／comparison） |
+
+**確認人來自驗證身分**：`gate_check.override.confirmed_by` 是後端依金鑰名稱或登入 email 記錄的身分（`key:…`／`admin:…`）；請求裡送的 `confirmed_by` 只存成 `note_confirmed_by` 備註，不當身分。認證上線前建立的放行紀錄沒有 `note_confirmed_by`，其 `confirmed_by` 是未驗證的文字。
+
+`run` 回應：`{"jobs": [{"job_id", "model_seed", "phase", "parent_job_id"?, "gate_check"?}], "frame": {...}}`。`gate_check`：`{"configured", "passed", "status": "passed|overridden|not_configured", "conditions": [{metric, op, value, weights, head, actual, ok, reason}], "override"?: {reason, confirmed_by, note_confirmed_by, at}}`。
+
+### 任務層端點
+
+| 端點 | 內容 |
+|---|---|
+| `GET /jobs/{id}/records?node_id=&dataset=val|holdout|train&weights=best|last&cursor=&limit=1000` | 逐筆結果（id 游標，上限 5000）：`sample_ts`、`decision_available_ts`、`window_start_ts`、`target_ts`、`target_available_ts`、`y_true`、`y_pred`、`proba`、`included`、`exclusion_reason`、`branches`（各分支最後一根時間、可用時間、`age_sec`、`sessions_back`、`previous_session`）、`upstream`（上游折次與可用時間）、`frame_hash`。`weights: null` 的列＝輸入不足未預測 |
+| `GET /jobs/{id}/evaluations` | Phase 3 評估（每組權重一列） |
+| `GET /jobs/{id}/holdout_usage` | 這筆任務相關的使用紀錄 |
+| `GET /jobs/{id}/upstream_folds` | 串接的上游折次清單（訓練範圍、清除區間、預測範圍、樣本數、權重指紋；`fold: -1`＝最終上游模型） |
+| `GET /jobs/{id}/cascade_audit?format=json|csv&sample_n=5` | 獨立核對（只讀紀錄重算 5 條規則）：`{"rules": {"r1": {"checked", "violations"}, …}, "passed", "violations": [...], "sample_chains": [...]}`；`csv` 回違反清單 |
+| `POST /warmup/suggest` `{"feature": {key, params, timeframe}, "epsilon": 0.01, "end": "2026-01-01", "n_bars": 3000}` | `{"program": {memory_type, base_bars, needs_researcher, detail}, "empirical": {"bars", "trials", "tolerance"}}`（只是建議） |
+| `GET /registry/v2`、`POST /registry/v2/feature_memory` | v2 元件清單；單一特徵的記憶類型與基本暖機 |
+
+### 資料表（`2026-11-16` 遷移新增）
+
+`model_experiments`、`model_experiment_arms`、`model_sample_frames`、`model_sample_frame_points`、`model_prediction_records`、`model_evaluations`、`model_holdout_usage`、`model_upstream_folds`；`model_training_jobs` 加 `experiment_id`、`arm_id`、`frame_id`、`model_seed`、`split_seed`、`gate_check`、`requested_by`；`model_experiments` 含 `created_by`；`model_artifacts` 加 `fingerprint`、`warmup_policy`、`train_class_counts`（存 `train_stats`）、`history_requirements`。
+
+
+## 新目標、特徵、模型（2026-11-21）
+
+依 Dot 2026-11-21 規格收斂（首版）；正式研究參數另定。
+
+### 目標（Label）
+
+| outcome | labeling_rule | 意義 | 單位（`output_specs.*.target.unit`） |
+|---|---|---|---|
+| `first_crossing` | `class_index` | 以 T 收完時算出的一組固定上下界，看 T+1～T+H 每根**收盤**第一次**嚴格**越線的一側與根數（收盤 > 上界＝上穿、< 下界＝下穿；恰好等於不算越線）。類別：`0～H-1`＝上穿第 1～H 根、`H～2H-1`＝下穿第 1～H 根、`2H`＝期限內未越界；`n_classes` 必須是 `2H+1`（H=4 → 9 類） | `class` |
+| `future_high_offset` | `identity` | `100 × (max(High[T+1..T+H]) / Close[T] − 1)`，不含 T，保留正負號 | `percent` |
+| `future_low_offset` | `identity` | `100 × (min(Low[T+1..T+H]) / Close[T] − 1)`，不含 T，保留正負號 | `percent` |
+
+**上下界（`params.bounds`）**：上下界各是一個 TA-Lib 指標的某個輸出，只用 ≤ T 的資料、每個 T 算一次，後續 H 根都和這組界線比較。首版：同週期收盤的 BBANDS（20 根、SMA、上下 2 倍標準差）。特徵 `price_position` 用同一格式，兩邊送同一份就是同一來源：
+
+```json
+{"upper": {"name": "BBANDS", "timeperiod": 20, "nbdevup": 2.0, "nbdevdn": 2.0, "matype": 0, "output": "upperband"},
+ "lower": {"name": "BBANDS", "timeperiod": 20, "nbdevup": 2.0, "nbdevdn": 2.0, "matype": 0, "output": "lowerband"}}
+```
+
+**類別名稱與機率欄序**：`result[node].output_specs.default.classes`＝`["up_1", …, "up_H", "down_1", …, "down_H", "none"]`（位置＝類別索引）。`output_mode: "probability"` 時 `columns`＝2H+1，逐筆結果的 `proba` 陣列欄序同 `classes`。
+
+**答案排除**（三個新目標都只能用在 `mode: "v2"`；既有目標不做這些檢查，行為不變）：
+
+| 原因代碼 | 條件 |
+|---|---|
+| `label_gap` | 同一交易時段內，T→T+H 任一步不符合該週期應有的時間格：前一根 `bar_end_ts` ≠ 下一根 `bar_start_ts`、K 棒長度 ≠ 週期、或起點不在「時段第一根起點＋k×週期」上 |
+| `label_cross_session` | T～T+H 跨到下一個交易時段（日盤↔夜盤、跨日）。`params.cross_session=true` 時改為允許（相鄰時段之間不檢查時間格，時段內照樣檢查） |
+| `label_start_outside` | `first_crossing`：T 收盤已在上下界之外（在界內或恰在線上才有答案） |
+| `label_unavailable`／`label_unmatured` | T+H 超出資料尾端（真值尚未成熟；holdout 記 `label_unmatured`，照常預測、不評估） |
+
+- 優先序：`label_gap` > `label_cross_session` > `label_start_outside`；尾端未成熟的列一律記 `label_unavailable`／`label_unmatured`，不會被記成前三種。上下界在暖機期是 NaN，那些列記 `label_unavailable`。
+- `params.gaps`：`exclude`（新目標預設）／`ignore`（不做 `label_gap`、`label_cross_session`，起點條件照做）。
+- **日線例外**：日線每根各自一個時段，H 根＝資料中接下來的 H 個交易日；不檢查時間格與跨時段，缺一整天偵測不到。
+- 各原因的筆數在 `result[node].training_meta.frame.counts.excluded_reasons`，逐點在 `GET /frames/{id}/points`、`GET /jobs/{id}/records`。
+
+### 特徵
+
+| key | 輸出 | 暖機 |
+|---|---|---|
+| `candle_parts` | 3 欄（點數）：實體 `abs(C−O)`、上影 `H−max(O,C)`、下影 `min(O,C)−L` | 0 |
+| `price_position` | 2 欄（點數）：`上界 − 收盤`、`收盤 − 下界`；`params.bounds` 與 `first_crossing` 相同 | 上下界指標較長者（BBANDS 20：19 根） |
+
+### 評估指標：Brier、Log loss
+
+分類評估（`evaluations`、`evaluation.best／last`、Phase 3）多 `brier`、`log_loss`；沒有機率輸出時為 `null` 並附 `*_unavailable_reason`。
+
+- **Brier 尺度**：二元＝`mean((p₁ − y)²)`，範圍 0～1；多分類＝`mean(Σ_k (p_k − 1[y=k])²)`（各類加總，Brier 1950 原始定義），範圍 0～2。同一份二元預測用多分類公式算會是二元值的 2 倍，**二元與多分類的 Brier 不能直接比較**。
+- **Log loss 零機率**：先把每列機率除以列和（修正浮點誤差），再由 scikit-learn 1.9 把機率截到 `[eps, 1−eps]`（eps＝float64 機器精度），所以真實類別機率為 0 時是一個很大但有限的值，不會是無限大。
+- **驗證集缺類別**：Brier 與 Log loss 的類別固定為全部類別（`labels=0..k-1`），照常計算；ROC-AUC 在缺類別時為 `null` 並附原因（既有規則）；`per_class` 該類 `support=0`。
+- **訓練折缺類別**（含上游各折）：輸出欄數由 Label 的 `n_classes` 決定，不因訓練資料缺類而變（XGBoost `num_class`、序列模型輸出層固定 k 欄），模型仍對缺的類別輸出機率（通常很小），評估照上列規則計算。
+
+### 有／無上游機率對照：共用樣本遮罩
+
+兩個任務要用完全相同的樣本時，「沒加」組保留同一個上游節點，但把引用它的分支設為 `"role": "mask"`：這個分支只套用上游的樣本可用性（樣本外預測是否存在、清除規則），**不輸入模型**。兩組其餘設定（框架、切分、窗格）相同即可。
+
+```json
+// 有加：
+{"id": "dn", "type": "model", "key": "lstm", "inputs": ["f", "up"], "label": "label", "params": {"...": "..."},
+ "branches": [{"id": "main", "inputs": ["f"], "window": 60},
+              {"id": "u", "inputs": ["up"], "window": 1, "encoder": "last_value"}]}
+// 沒加（只差 role）：
+{"id": "dn", "type": "model", "key": "lstm", "inputs": ["f", "up"], "label": "label", "params": {"...": "..."},
+ "branches": [{"id": "main", "inputs": ["f"], "window": 60},
+              {"id": "u", "inputs": ["up"], "window": 1, "encoder": "last_value", "role": "mask"}]}
+```
+
+- 比對：`result[dn].training_meta.sample_sets`＝`{"train": {"n", "hash"}, "val": {"n", "hash"}, "mask_branches": [...]}`；Phase 3 在 `result[dn].holdout.sample_set`（只算納入評估的點）。`hash`＝樣本 ID（決策 K 棒 `bar_start_ts`，奈秒整數排序後）的 SHA-256；兩任務的 hash 相同＝樣本完全一致。另外 `frame.hash` 相同＝框架與切分相同（實驗層的組別共用框架）。
+- 至少要有一個 `role: "input"` 的分支。`role: "mask"` 的分支也可以放特徵（只套暖機可用性）。
+
+### 上游樣本外機率（`upstream_policy.save_oof`）
+
+上游設 `"upstream_policy": {"strategy": "forward_chaining", "k": 5, "save_oof": true}`（預設 false）時，worker 把每一列的樣本外預測寫進逐筆結果：`GET /jobs/{id}/records?node_id=<上游>&dataset=upstream_oof`。
+
+- 每列：`y_true`（上游自己的標籤）、`y_pred`（機率 argmax）、`proba`（欄序＝類別索引，名稱見上游 `output_specs.default.classes`）、`weights="best"`、`upstream`＝`{"fold": k, "train_end": 該折最晚訓練樣本的決策時刻, "train_max_label_end": 該折訓練樣本中最晚的答案可用時間}`。`result[上游].n_upstream_oof_records` 記筆數；各折完整範圍見 `GET /jobs/{id}/upstream_folds`。
+- `forward_chaining`：每折只用「答案在該段開始前（再扣清除範圍）就已成熟」的訓練點；第一段沒有預測（下游記 `upstream_unavailable`）。跨週期時上游預測依 as-of 對齊，只用 T 時已收完的上游 K 棒。`purged_kfold` 會用到較晚的資料，不符合「只看更早」。
+- 全期間 tx_1m 可達數百萬列，只在需要時開。
+
+### 模型（`gru`／`cnn_lstm`／`transformer`）
+
+與 LSTM 共用資料組裝、分支、正規化、訓練迴圈（批次、早停、best／last）、單頭分類／回歸、雙頭、評估、具名輸出、串接、推論與產物保存。共同欄位與 LSTM 相同且同樣必填：`heads`、`shared.dense`、`shared.dropout`、`optimizer`、`batch_size`、`epochs`、`early_stopping`、`seed`（選填：`target_scaling`、`class_weight`、雙頭的 `direction_rule`／`loss_weights`）。本版不支援 Attention。分支 `encoder` 預設等於模型 key，也可用 `last_value`。完整 schema：`GET /api/model/registry/architectures`。
+
+| key | 專屬欄位 | 結構 |
+|---|---|---|
+| `gru` | `gru_layers`（[{units, dropout}]）、`bidirectional` | 疊層 GRU；每層輸出後 dropout；摘要＝最後一層最後一步的 hidden state（單向時就是最後一步輸出） |
+| `cnn_lstm` | `conv_layers`（[{filters, kernel_size, activation: relu／none}]）、`pool_size`、`lstm_layers`、`bidirectional` | Conv1d（stride 1、padding same；kernel 1 等於不補邊）→ ReLU → MaxPool1d(pool_size，stride＝pool_size；window 60、pool 3 → 20 步) → 疊層 LSTM（每層輸出後 dropout，摘要同 LSTM） |
+| `transformer` | `transformer.{d_model, n_heads, n_layers, ff_dim, dropout, positional: sinusoidal／learned, pooling: last／mean}` | Linear 投影到 d_model → 位置編碼 → TransformerEncoderLayer（post-norm、ReLU）× n_layers → pooling；不加因果遮罩。`d_model` 必須能被 `n_heads` 整除 |
+
+**所有序列模型的輸出頭**：序列摘要 → `shared` Dense＋ReLU＋dropout → 輸出層。`shared` 是必填的一層 Dense，**不能省略**（要接近「摘要直接接輸出層」可以把 `shared.dropout` 設 0、`shared.dense` 設成摘要寬度，但仍多一層 Dense＋ReLU）。
+
+本機驗收配置（window 60；共同欄位為工程驗收值）：
+
+```json
+{"cnn_lstm": {"conv_layers": [{"filters": 32, "kernel_size": 1, "activation": "relu"}], "pool_size": 3,
+              "lstm_layers": [{"units": 64, "dropout": 0.2}], "bidirectional": false},
+ "gru": {"gru_layers": [{"units": 64, "dropout": 0.2}], "bidirectional": false},
+ "transformer": {"transformer": {"d_model": 64, "n_heads": 4, "n_layers": 2, "ff_dim": 128, "dropout": 0.1,
+                                 "positional": "sinusoidal", "pooling": "last"}},
+ "共同欄位": {"heads": "single", "shared": {"dense": 64, "dropout": 0.0},
+              "optimizer": {"type": "adam", "lr": 0.001, "weight_decay": 0.0}, "batch_size": 64, "epochs": 2,
+              "early_stopping": {"monitor": "val_loss", "patience": 0}, "seed": 42}}
+```
+
+網站：新目標與新模型目前用後台「模型實驗」頁的 JSON 或直接呼叫 API 送出；後台「模型設定」畫布（舊格式圖）的模型選單會列出新模型，但不能選新目標。
+
 ## 已知限制（截至這份文件更新時的程式碼狀態）
 
-- **正規化**已接（train-only fit 的 MinMax）。**跨時間框架**（例如 15m 模型接 1h 模型、或 Feature 與 Label 不同時間框架）自 `2026-11-r1` 起提交時直接回 400，M4（依 `bar_start_ts` 對齊、依 `bar_end_ts`＋延遲判定可用、可設定沿用前一時段與過舊上限）完成後開放。
-- 上游 Model Node 接下游時，上游對自己訓練用的「全範圍」窗格是用同一個已 fit 過的模型直接預測（不是 OOF/out-of-fold），下游等於看到上游對 train 段的過擬合結果——這是已知的資料洩漏風險，尚未處理；具名輸出不改變這一點。
+- **正規化**已接（train-only fit 的 MinMax；v2 的步驟框架目前也只有 `global_minmax`）。**跨時間框架**：舊格式的圖仍回 400；`mode: "v2"` 的圖開放（as-of 對齊與子 K 棒彙總，見「v2 圖與實驗層」）。
+- **舊格式的圖**：上游 Model Node 接下游時仍是樣本內預測（有洩漏，為了相容行為不變）。要防洩漏請改用 `mode: "v2"`（預設 `forward_chaining` OOF）。
+- v2：一個 Model Node 只能有一個 Label；只支援 TX 系列；編碼器只有 `lstm`／`gru`／`cnn_lstm`／`transformer`／`flatten`／`last_value`（一個節點的序列分支都用同一種，依模型 key），合併只有 concat；所有 lstm 分支共用節點的 `lstm_layers`／`bidirectional`／`attention`；串接的 Phase 3（與一般推論）上游模型固定用 best 權重，`use_weights` 只影響最終模型（最終模型 best、last 都會評估）；沒有超參數搜尋、跨商品、形成中 K 棒。發布延遲預設 0 秒且為未實測假設。GPU 訓練不保證逐位元組重現；遞迴型指標只保證在 ε 內一致（固定錨點除外）。
 - 推論時欄位順序依 `inputs` 的原始順序（與訓練相同）。**具名輸出修正部署之前的推論實作是「先全部 Feature、再接上游模型」**，只有 `inputs` 剛好是這個排列時才跟訓練對得上；如果有把模型排在特徵前面或夾在中間的舊產物，推論結果可能錯位，需重新訓練。管理後台產生的圖一律特徵在前，不受影響。
-- 進階 `labeling_rule`（波動度門檻、分位數切分、成本導向、triple barrier）還沒做，目前只有 `fixed_threshold`（分類）跟 `identity`（回歸）。
+- 進階 `labeling_rule`（波動度門檻、分位數切分、成本導向、triple barrier）還沒做，目前有 `fixed_threshold`（分類）、`identity`（回歸）、`class_index`（類別型目標，例如 `first_crossing`）。
 - `/cancel` 只改 DB 狀態，無法真的中斷背景運算中的訓練。
 - **混合模型目前僅支援節點輸出串接**：上游模型節點凍結後的輸出，當作下游模型節點的一個輸入特徵，兩個節點各自獨立訓練，沒有梯度互通。**不支援**聯合訓練（end-to-end 跨節點反向傳播）、集成投票／加權融合這類結構、共享編碼器的多任務結構——這些都還沒實作，不要從「支援具名輸出引用」推論出更廣的能力。
 - **Attention 本版本只支援零或一個**，不支援多個 Attention 的串接或並聯；送清單一律 400，不是靜默忽略（未來擴充點見 [extending.md](extending.md)）。

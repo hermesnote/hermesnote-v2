@@ -72,3 +72,19 @@ export function useAuth() {
 export function getAuthToken() {
   return localStorage.getItem(TOKEN_KEY);
 }
+
+/** 模型 API 寫入（/api/model/* 的 POST／PATCH／DELETE）：帶後台登入 token；後端回 401（未登入／過期）時清掉 token 回登入頁。
+ *  403 照常回傳給呼叫端顯示（例如帳號不在白名單）。讀取（GET）不需要用這個。 */
+export async function modelWriteFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const token = localStorage.getItem(TOKEN_KEY);
+  const headers = new Headers(init.headers);
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  if (init.body !== undefined && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  const res = await fetch(url, { ...init, headers });
+  if (res.status === 401) {
+    localStorage.removeItem(TOKEN_KEY);
+    window.alert("登入已過期或尚未登入，請重新登入後再操作（這次的操作沒有送出）。");
+    window.location.assign("/admin/login");
+  }
+  return res;
+}

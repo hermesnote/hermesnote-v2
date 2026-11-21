@@ -35,7 +35,9 @@ _RESULT_PROJECTION = """
 
 # 流程版本與資料紀錄（2026-11 M1 遷移新增）。舊任務這些欄位是 NULL：pipeline_version=None 代表 2026-11-r1 以前。
 # 列表不帶 data_report 全文（每個時間框架一份報告），只帶提示；單筆查詢才帶完整內容。
-_PROVENANCE_COLUMNS = ", pipeline_version, warnings, env_fingerprint, data_report"
+_PROVENANCE_COLUMNS = (", pipeline_version, warnings, env_fingerprint, data_report"
+                       # 實驗層（2026-11-16 M2～M7 遷移新增）；舊任務都是 NULL
+                       ", experiment_id, arm_id, frame_id, model_seed, split_seed, gate_check, requested_by")
 
 
 def _provenance(row, with_report: bool) -> dict:
@@ -47,7 +49,12 @@ def _provenance(row, with_report: bool) -> dict:
     # 執行時的提示（data_report.warnings）優先：worker 用的是實際執行的規則
     if report and report.get("warnings") is not None:
         warnings = report["warnings"]
-    out = {"pipeline_version": row["pipeline_version"], "warnings": warnings}
+    out = {"pipeline_version": row["pipeline_version"], "warnings": warnings,
+           "experiment_id": str(row["experiment_id"]) if row["experiment_id"] else None,
+           "arm_id": str(row["arm_id"]) if row["arm_id"] else None,
+           "frame_id": str(row["frame_id"]) if row["frame_id"] else None,
+           "model_seed": row["model_seed"], "split_seed": row["split_seed"], "gate_check": load(row["gate_check"]),
+           "requested_by": row["requested_by"]}
     if with_report:
         out["env_fingerprint"] = load(row["env_fingerprint"])
         out["data_report"] = report
@@ -56,7 +63,9 @@ def _provenance(row, with_report: bool) -> dict:
 
 async def create_job(
     graph_spec: dict, job_type: str = "train", phase: int | None = None, parent_job_id: str | None = None,
-    warnings: list | None = None,
+    warnings: list | None = None, *, experiment_id: str | None = None, arm_id: str | None = None,
+    frame_id: str | None = None, model_seed: int | None = None, split_seed: int | None = None,
+    gate_check: dict | None = None, requested_by: str | None = None,
 ) -> str:
     """`graph_spec` 這個欄位名稱是歷史包袱——job_type='infer' 時裡面存的不是節點圖，
     是 `{"target_job_id","target_node_id","start","end"}` 這種推論請求，重用同一個
@@ -64,16 +73,27 @@ async def create_job(
     """
     conn = await get_conn()
     try:
+        cols = ["graph_spec", "status", "job_type", "phase", "parent_job_id", "pipeline_version", "warnings"]
+        vals = [json.dumps(graph_spec), "pending", job_type, phase, uuid.UUID(parent_job_id) if parent_job_id else None,
+                PIPELINE_VERSION, json.dumps(warnings or [])]
+        # 實驗層欄位只在有值時才寫（舊呼叫端的 SQL 與之前相同）
+        for c, v in (("experiment_id", experiment_id), ("arm_id", arm_id), ("frame_id", frame_id)):
+            if v is not None:
+                cols.append(c)
+                vals.append(uuid.UUID(str(v)))
+        for c, v in (("model_seed", model_seed), ("split_seed", split_seed)):
+            if v is not None:
+                cols.append(c)
+                vals.append(int(v))
+        if gate_check is not None:
+            cols.append("gate_check")
+            vals.append(json_safe.dumps(gate_check))
+        if requested_by is not None:  # 驗證身分（admin:<email>／key:<名稱>），見 auth.require_model_writer
+            cols.append("requested_by")
+            vals.append(requested_by)
+        ph = ", ".join(f"${i + 1}" for i in range(len(cols)))
         row = await conn.fetchrow(
-            """
-            INSERT INTO model_training_jobs (graph_spec, status, job_type, phase, parent_job_id, pipeline_version, warnings)
-            VALUES ($1, 'pending', $2, $3, $4, $5, $6)
-            RETURNING id
-            """,
-            json.dumps(graph_spec), job_type, phase,
-            uuid.UUID(parent_job_id) if parent_job_id else None,
-            PIPELINE_VERSION, json.dumps(warnings or []),
-        )
+            f"INSERT INTO model_training_jobs ({', '.join(cols)}) VALUES ({ph}) RETURNING id", *vals)
         return str(row["id"])
     finally:
         await conn.close()
@@ -117,26 +137,167 @@ async def mark_running(job_id: str, device: str, env_fingerprint: dict | None = 
 
 async def save_data_report(job_id: str, report: dict) -> None:
     """讀取報告（各時間框架的排除筆數、rule_version 分布、缺格數、期間提示）；讀完資料、訓練前寫入，
-    所以訓練失敗的任務也查得到當時讀到什麼。"""
+    所以訓練失敗的任務也查得到當時讀到什麼。worker 程序中只在任務仍屬於本實例時寫入（見 training/fence.py）。"""
+    clause, extra = _owned_clause(3)
     conn = await get_conn()
     try:
-        await conn.execute(
-            "UPDATE model_training_jobs SET data_report = $2 WHERE id = $1",
-            uuid.UUID(job_id), json_safe.dumps(report),
+        status = await conn.execute(
+            "UPDATE model_training_jobs SET data_report = $2 WHERE id = $1" + clause,
+            uuid.UUID(job_id), json_safe.dumps(report), *extra,
         )
     finally:
         await conn.close()
+    if extra and not status.endswith(" 1"):
+        from training import fence
+
+        raise fence.LostOwnership(f"任務 {job_id} 已不屬於 worker 實例 {fence.INSTANCE}，讀取報告不寫入")
 
 
-async def mark_done(job_id: str, result: dict) -> None:
+# ── worker 排他與任務狀態（2026-11-18：中斷後殘留 running 與失鎖後舊 worker 的處理） ───────────────────
+# 1. 單一實例鎖（WorkerLock）：worker 啟動時用一條專用連線取得 PostgreSQL session 層級 advisory lock，整個程序期間持有。
+#    連線斷開時資料庫自動釋放；伺服器端 keepalive 30／10／3 讓網路中斷的連線約 1 分鐘內被判定失效。
+# 2. 認領與回收都在「持有鎖的那條連線」上執行，同一條 SQL 內確認仍持有鎖：失去鎖的 worker 無法再認領或回收。
+#    認領是原子操作（FOR UPDATE SKIP LOCKED），同時寫入 worker 身分（env_fingerprint.worker）。
+# 3. 回收：持有鎖的 worker 啟動時，把「running、有 worker 身分、實例 ID 不是自己」的任務改成 failed。
+#    沒有 worker 身分的舊任務不動。
+# 4. 寫入的所有權檢查（training/fence.py）：worker 的每一筆寫入都先確認任務仍是 running 且屬於本實例；
+#    任務列本身的寫入（讀取報告、完成、失敗）直接把同樣的條件放在 UPDATE 的 WHERE。
+WORKER_LOCK_KEY = 4848_2026_1118  # pg_advisory_lock 的 bigint 鍵（訓練 worker 專用）
+INTERRUPTED_ERROR = "worker 中斷，原因未判定"
+LOCK_QUERY_TIMEOUT_SEC = 5
+RESOURCE_PROBE = None  # worker 設定：回傳 data_report.resources 內容的函式（完成／失敗寫入時一併記錄）
+
+_HOLDS_LOCK = ("EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND granted "
+               f"AND ((classid::bigint << 32) | objid::bigint) = {WORKER_LOCK_KEY})")
+
+
+class WorkerLock:
+    """持有 advisory lock 的連線。同一條 asyncpg 連線不能同時執行兩個查詢，所有使用都經過 self._mutex。"""
+
+    def __init__(self, conn):
+        import asyncio
+
+        self.conn = conn
+        self._mutex = asyncio.Lock()
+
+    async def alive(self) -> bool:
+        """仍持有鎖嗎？連線失效、查詢逾時（網路中斷）都視為失去鎖。"""
+        import asyncio
+
+        try:
+            if self.conn.is_closed():
+                return False
+            async with self._mutex:
+                return bool(await asyncio.wait_for(self.conn.fetchval("SELECT " + _HOLDS_LOCK),
+                                                   LOCK_QUERY_TIMEOUT_SEC))
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def claim_next_pending(self, device: str, env_fingerprint: dict) -> dict | None:
+        """原子認領最早的 pending 任務；沒有可認領的任務、被搶先、或已失去鎖時回傳 None。"""
+        async with self._mutex:
+            row = await self.conn.fetchrow(
+                f"""
+                UPDATE model_training_jobs SET status = 'running', device = $1, started_at = now(),
+                       pipeline_version = $2, env_fingerprint = $3
+                WHERE id = (SELECT id FROM model_training_jobs WHERE status = 'pending'
+                            ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
+                  AND status = 'pending' AND {_HOLDS_LOCK}
+                RETURNING id, graph_spec, job_type, phase
+                """,
+                device, PIPELINE_VERSION, json_safe.dumps(env_fingerprint or {}), timeout=30,
+            )
+        if row is None:
+            return None
+        return {"id": str(row["id"]), "graph_spec": json.loads(row["graph_spec"]), "job_type": row["job_type"],
+                "phase": row["phase"]}
+
+    async def reclaim_orphans(self, my_instance: str) -> list[dict]:
+        """回收其他實例殘留的 running。回傳 [{id, instance}]；只動 status／finished_at／error。"""
+        async with self._mutex:
+            rows = await self.conn.fetch(
+                f"""
+                UPDATE model_training_jobs
+                SET status = 'failed', finished_at = now(),
+                    error = $2 || '（原 worker 實例 ' || (env_fingerprint->'worker'->>'instance')
+                            || '，由實例 ' || $1 || ' 啟動時回收）'
+                WHERE status = 'running'
+                  AND env_fingerprint ? 'worker'
+                  AND (env_fingerprint->'worker'->>'instance') IS NOT NULL
+                  AND (env_fingerprint->'worker'->>'instance') <> $1
+                  AND {_HOLDS_LOCK}
+                RETURNING id, env_fingerprint->'worker'->>'instance' AS instance
+                """,
+                my_instance, INTERRUPTED_ERROR, timeout=60,
+            )
+        return [{"id": str(r["id"]), "instance": r["instance"]} for r in rows]
+
+    async def close(self) -> None:
+        await self.conn.close()
+
+
+async def acquire_worker_lock() -> "WorkerLock | None":
+    """取得鎖就回傳 WorkerLock；鎖被其他程序持有時回傳 None。"""
+    import asyncpg
+
+    from services.hermesnote_db import HERMESNOTE_DATABASE_URL
+
+    conn = await asyncpg.connect(HERMESNOTE_DATABASE_URL, timeout=15, server_settings={
+        "application_name": "hermesnote-training-worker-lock",
+        "tcp_keepalives_idle": "30", "tcp_keepalives_interval": "10", "tcp_keepalives_count": "3"})
+    if await conn.fetchval("SELECT pg_try_advisory_lock($1)", WORKER_LOCK_KEY):
+        return WorkerLock(conn)
+    await conn.close()
+    return None
+
+
+def _owned_clause(first_param: int) -> tuple[str, list]:
+    """任務列寫入的所有權條件：worker 程序（fence.INSTANCE 已設定）時必須仍是 running 且為本實例認領。"""
+    from training import fence
+
+    if fence.INSTANCE is None:
+        return "", []
+    return (f" AND status = 'running' AND (env_fingerprint->'worker'->>'instance') = ${first_param}",
+            [fence.INSTANCE])
+
+
+def _resources() -> str | None:
+    if RESOURCE_PROBE is None:
+        return None
+    try:
+        r = RESOURCE_PROBE()
+    except Exception:  # noqa: BLE001 — 紀錄失敗不影響任務狀態
+        return None
+    return json_safe.dumps(r) if r else None
+
+
+async def _finish(job_id: str, sets: str, args: list) -> bool:
+    res = _resources()
+    if res is not None:
+        sets += (", data_report = COALESCE(data_report, '{}'::jsonb) || "
+                 f"jsonb_build_object('resources', ${len(args) + 2}::jsonb)")
+        args = args + [res]
+    clause, extra = _owned_clause(len(args) + 2)
     conn = await get_conn()
     try:
-        await conn.execute(
-            "UPDATE model_training_jobs SET status = 'done', result = $2, finished_at = now() WHERE id = $1",
-            uuid.UUID(job_id), json_safe.dumps(result),
-        )
+        status = await conn.execute(f"UPDATE model_training_jobs SET {sets} WHERE id = $1" + clause,
+                                    uuid.UUID(job_id), *args, *extra)
     finally:
         await conn.close()
+    return status.endswith(" 1")
+
+
+async def mark_done(job_id: str, result: dict) -> bool:
+    """worker 寫入完成。worker 程序中只有任務仍是 running 且為本實例認領時生效；回傳是否寫入。"""
+    ok = await _finish(job_id, "status = 'done', result = $2, finished_at = now()", [json_safe.dumps(result)])
+    if not ok:
+        print(f"[worker] 任務 {job_id} 已不是本 worker 執行中的狀態（可能已取消或被回收），完成結果不寫入", flush=True)
+    return ok
+
+
+async def mark_failed_by_worker(job_id: str, error: str) -> bool:
+    """worker 寫入失敗。條件同 mark_done；使用者手動中斷（API）仍用 mark_failed。"""
+    return await _finish(job_id, "status = 'failed', error = $2, finished_at = now()", [error])
 
 
 async def mark_failed(job_id: str, error: str) -> None:
@@ -148,6 +309,20 @@ async def mark_failed(job_id: str, error: str) -> None:
         )
     finally:
         await conn.close()
+
+
+async def list_job_summaries(limit: int = 1000) -> list[dict]:
+    """訓練頁下拉選單用的輕量清單：只有 ID、類型、狀態、建立時間（不讀 graph_spec／result，一百多筆也只有十幾 KB）。"""
+    conn = await get_conn()
+    try:
+        rows = await conn.fetch(
+            "SELECT id, job_type, status, created_at FROM model_training_jobs ORDER BY created_at DESC LIMIT $1",
+            limit,
+        )
+    finally:
+        await conn.close()
+    return [{"job_id": str(r["id"]), "job_type": r["job_type"], "status": r["status"],
+             "created_at": r["created_at"].isoformat() if r["created_at"] else None} for r in rows]
 
 
 async def list_jobs(limit: int = 20) -> list[dict]:

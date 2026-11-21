@@ -72,6 +72,7 @@ class _PredictionWriter:
         self._conn.autocommit = True
         with self._conn.cursor() as cur:
             cur.execute(f"SET statement_timeout = {_STATEMENT_TIMEOUT_MS}")
+        self._conn.autocommit = False  # 之後每批各自一個交易（含所有權檢查）
 
     def write_chunk(
         self, timestamps: list[int], predictions: list[list[float]], task_type: str, is_probability: bool,
@@ -84,7 +85,11 @@ class _PredictionWriter:
             output_type, predicted, probabilities = row_to_output(pred, task_type, is_probability, output_kind)
             avail = available_ts[i] if available_ts is not None else None
             rows.append((self.job_id, self.node_id, ts, avail, output_type, predicted, probabilities))
-        with self._conn.cursor() as cur:
+        from training import fence
+
+        # 每一批：所有權檢查與寫入在同一個交易（見 training/fence.py）
+        with self._conn, self._conn.cursor() as cur:
+            fence.check_sync(cur, self.job_id)
             execute_values(
                 cur,
                 """

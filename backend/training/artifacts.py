@@ -32,10 +32,13 @@ def save_artifacts_for_job(job_id: str, graph_spec: dict, results: dict) -> None
     nodes = {n["id"]: n for n in graph_spec["nodes"]}
     model_node_ids = {nid for nid, n in nodes.items() if n["type"] == "model"}
 
+    from training import fence
+
     conn = psycopg2.connect(_SYNC_DATABASE_URL)
     try:
-        conn.autocommit = True
-        with conn.cursor() as cur:
+        # 同一筆任務的所有產物在一個交易內寫入，並先做所有權檢查（見 training/fence.py）
+        with conn, conn.cursor() as cur:
+            fence.check_sync(cur, job_id)
             for nid, result in results.items():
                 if "weights" not in result or "model_config" not in result:
                     continue  # 這個架構這次沒回傳可保存的權重（理論上不會發生，防呆）
@@ -55,6 +58,10 @@ def save_artifacts_for_job(job_id: str, graph_spec: dict, results: dict) -> None
                 # weights＝best（監控指標最好那一輪）、weights_last＝最後一輪；所有架構都回傳兩組
                 # （欄位由 migrations/2026-09-23_weights_last_and_evaluation.sql 新增，部署前必須先套用）
                 weights_last = result.get("weights_last")
+                import hashlib
+
+                v2 = result.get("v2") or {}
+                fingerprint = hashlib.sha256(bytes(result["weights"])).hexdigest()
                 values = [
                     job_id, nid, node["key"], result.get("task_type", "classification"),
                     psycopg2.Binary(result["weights"]),
@@ -63,19 +70,25 @@ def save_artifacts_for_job(job_id: str, graph_spec: dict, results: dict) -> None
                     json.dumps(feature_schema), json.dumps(target_spec), json.dumps(graph_spec),
                     json.dumps(result.get("preprocessing_state", {"method": "none"})),
                     json.dumps(depends_on_node_ids),
+                    fingerprint, json_safe.dumps(v2.get("warmup_policy")) if v2 else None,
+                    json_safe.dumps(result.get("train_stats")) if result.get("train_stats") is not None else None,
+                    json_safe.dumps(v2.get("history_requirements")) if v2 else None,
                 ]
                 cur.execute(
                     """
                     INSERT INTO model_artifacts (job_id, node_id, architecture_key, task_type, weights, weights_last,
                         model_config, feature_schema, target_spec, graph_spec_snapshot, preprocessing_state,
-                        depends_on_node_ids)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        depends_on_node_ids, fingerprint, warmup_policy, train_class_counts, history_requirements)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (job_id, node_id) DO UPDATE SET
                         weights = EXCLUDED.weights, weights_last = EXCLUDED.weights_last,
                         model_config = EXCLUDED.model_config, feature_schema = EXCLUDED.feature_schema,
                         target_spec = EXCLUDED.target_spec, graph_spec_snapshot = EXCLUDED.graph_spec_snapshot,
                         preprocessing_state = EXCLUDED.preprocessing_state,
-                        depends_on_node_ids = EXCLUDED.depends_on_node_ids
+                        depends_on_node_ids = EXCLUDED.depends_on_node_ids,
+                        fingerprint = EXCLUDED.fingerprint, warmup_policy = EXCLUDED.warmup_policy,
+                        train_class_counts = EXCLUDED.train_class_counts,
+                        history_requirements = EXCLUDED.history_requirements
                     """,
                     values,
                 )
@@ -92,7 +105,8 @@ def load_artifact(job_id: str, node_id: str) -> dict | None:
     try:
         with conn.cursor() as cur:
             keys = ["architecture_key", "task_type", "weights", "weights_last", "model_config", "feature_schema",
-                    "target_spec", "graph_spec_snapshot", "depends_on_node_ids", "preprocessing_state"]
+                    "target_spec", "graph_spec_snapshot", "depends_on_node_ids", "preprocessing_state",
+                    "fingerprint", "warmup_policy", "train_class_counts", "history_requirements"]
             cur.execute(
                 f"SELECT {', '.join(keys)} FROM model_artifacts WHERE job_id = %s AND node_id = %s",
                 (job_id, node_id),

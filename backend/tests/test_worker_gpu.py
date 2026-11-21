@@ -60,6 +60,28 @@ def _spec(seed):
         H._model("m", "lstm", ["fa"], "lc", params=H.lstm_params(seed=seed, epochs=2))]}
 
 
+def _worker_db_stubs(fetched: list, mark):
+    """main_loop 的資料庫步驟（2026-11-18）：鎖與回收、在鎖連線上認領、有條件的失敗寫入，全部換成替身。
+    認領回傳剛剛 fetch 到的任務並記成 running（取代舊的 mark_running）。"""
+    class Lock:
+        async def alive(self):
+            return True
+
+        async def claim_next_pending(self, device, fp):
+            job = fetched[-1]
+            await mark("running", job["id"])
+            return job
+
+    async def acquire(identity):
+        return Lock()
+
+    async def watchdog(lock):
+        await asyncio.Event().wait()
+
+    return [mock.patch.object(worker, "acquire_lock_and_reclaim", acquire),
+            mock.patch.object(worker, "_lock_watchdog", watchdog)]
+
+
 class SequentialJobsTests(unittest.TestCase):
     def test_same_worker_runs_next_job_after_finishing_one(self):
         """真的跑兩筆訓練（CPU、合成資料，DB 寫入換成記錄），第一筆完成後 GPU 顯示仍有 worker 佔用
@@ -68,9 +90,12 @@ class SequentialJobsTests(unittest.TestCase):
                  {"id": "job-2", "job_type": "train", "graph_spec": _spec(2)}]
         events = []
 
+        fetched = []
+
         async def fetch_next_pending():
             if queue:
-                return queue.pop(0)
+                fetched.append(queue.pop(0))
+                return fetched[-1]
             raise _Stop()
 
         async def mark(kind, job_id, *a):
@@ -93,7 +118,10 @@ class SequentialJobsTests(unittest.TestCase):
                 mock.patch.object(worker, "save_artifacts_for_job", lambda *a: events.append(("artifacts", a[0]))), \
                 mock.patch.object(worker, "query_gpu_memory", return_value=INCIDENT), \
                 mock.patch.object(worker, "release_gpu_memory", release), \
-                mock.patch.object(worker.asyncio, "sleep", no_sleep):
+                mock.patch.object(worker.asyncio, "sleep", no_sleep),                 mock.patch.object(worker.job_store, "mark_failed_by_worker", lambda j, e: mark(f"failed:{e}", j)):
+            for p in _worker_db_stubs(fetched, mark):
+                p.start()
+                self.addCleanup(p.stop)
             with self.assertRaises(_Stop):
                 asyncio.run(worker.main_loop())
 
@@ -110,9 +138,12 @@ class SequentialJobsTests(unittest.TestCase):
                  {"id": "good", "job_type": "train", "graph_spec": _spec(2)}]
         events = []
 
+        fetched = []
+
         async def fetch_next_pending():
             if queue:
-                return queue.pop(0)
+                fetched.append(queue.pop(0))
+                return fetched[-1]
             raise _Stop()
 
         async def mark(kind, job_id):
@@ -129,7 +160,10 @@ class SequentialJobsTests(unittest.TestCase):
                 mock.patch.object(worker, "write_progress", lambda *a: None), \
                 mock.patch.object(worker, "save_preview_sample", lambda *a: None), \
                 mock.patch.object(worker, "save_artifacts_for_job", lambda *a: None), \
-                mock.patch.object(worker, "query_gpu_memory", return_value=INCIDENT):
+                mock.patch.object(worker, "query_gpu_memory", return_value=INCIDENT),                 mock.patch.object(worker.job_store, "mark_failed_by_worker", lambda j, e: mark("failed", j)):
+            for p in _worker_db_stubs(fetched, mark):
+                p.start()
+                self.addCleanup(p.stop)
             with self.assertRaises(_Stop):
                 asyncio.run(worker.main_loop())
         # 驗證失敗的任務在讀資料前就失敗，不會寫讀取報告；合法任務讀完資料、訓練前寫入

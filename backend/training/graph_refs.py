@@ -108,6 +108,34 @@ def _param_issues(nid: str, node: dict) -> list[str]:
     return out
 
 
+GAP_POLICIES = ("exclude", "ignore")
+
+
+def _outcome_issues(nid: str, node: dict, outcome: str, is_v2: bool) -> list[str]:
+    """2026-11-21 新目標的專屬檢查：只能用在 v2 圖、上下界設定、類別數、缺格設定。"""
+    from training.registry import bounds, outcomes
+
+    meta = outcomes.OUTCOME_META.get(outcome, {})
+    params = node.get("params") or {}
+    out = []
+    if meta.get("v2_only") and not is_v2:
+        out.append(f"Label 節點 {nid}：outcome {outcome!r} 只能用在 mode=v2 的圖（缺格檢查需要 K 棒時間）")
+    if outcome == "first_crossing":
+        out.extend(f"Label 節點 {nid}：params.{p}" for p in bounds.validate(params.get("bounds")))
+    if outcome in outcomes.OUTCOME_CLASSES:
+        k = len(outcomes.OUTCOME_CLASSES[outcome](params))
+        if params.get("n_classes") != k:
+            out.append(f"Label 節點 {nid}：{outcome} 在 horizon={params.get('horizon', 1)} 時有 {k} 類，"
+                       f"params.n_classes 必須是 {k}，收到 {params.get('n_classes')!r}")
+    gaps = params.get("gaps")
+    if gaps is not None and gaps not in GAP_POLICIES:
+        out.append(f"Label 節點 {nid}：params.gaps 必須是 {list(GAP_POLICIES)} 之一，收到 {gaps!r}")
+    cs = params.get("cross_session")
+    if cs is not None and not isinstance(cs, bool):
+        out.append(f"Label 節點 {nid}：params.cross_session 必須是 true／false，收到 {cs!r}")
+    return out
+
+
 def _node_field_issues(nid: str, node: dict) -> list[str]:
     """Model Node 本身的欄位型別（window／val_ratio／output_mode），graph.py 會直接轉型使用。"""
     out: list[str] = []
@@ -168,6 +196,11 @@ def validate_graph_spec(graph_spec: dict) -> None:
                 labeling_rules.validate_combination(outcome, rule)
             except ValueError as e:
                 issues.append(f"Label 節點 {nid}：{e}")
+                ok = False
+        if ok:
+            more = _outcome_issues(nid, n, outcome, graph_spec.get("mode") == "v2")
+            if more:
+                issues.extend(more)
                 ok = False
         if ok:
             label_task_types[nid] = labeling_rules.LABELING_RULE_TASK_TYPE.get(rule)
@@ -231,8 +264,16 @@ def validate_graph_spec(graph_spec: dict) -> None:
 
     cycle_problems = _cycle_issues(edges)
     issues.extend(cycle_problems)
+    is_v2 = graph_spec.get("mode") == "v2"
+    if graph_spec.get("mode") not in (None, "v2"):
+        issues.append(f"graph_spec.mode 只能是 \"v2\" 或不給（舊格式），收到 {graph_spec.get('mode')!r}")
     if not cycle_problems:
-        issues.extend(cross_timeframe_issues(nodes, edges))
+        if is_v2:
+            if not issues:
+                issues.extend(v2_issues(graph_spec, nodes))
+        else:
+            issues.extend(cross_timeframe_issues(nodes, edges))
+            issues.extend(_legacy_v2_field_issues(nodes, graph_spec))
     if issues:
         raise GraphValidationError(issues)
 
@@ -270,6 +311,66 @@ def cross_timeframe_issues(nodes: dict, edges: dict) -> list[str]:
                 issues.append(f"Model 節點 {nid}：輸入與 Label 用到多個時間框架 {sorted(used)}；"
                               "跨時間框架對齊（依 bar_start_ts 對齊、依 bar_end_ts 判定可用）完成前暫不開放")
     return issues
+
+
+_V2_NODE_FIELDS = {"feature": ("warmup", "transform"), "model": ("branches", "upstream_policy", "normalization")}
+
+
+def _legacy_v2_field_issues(nodes: dict, graph_spec: dict) -> list[str]:
+    """舊格式的圖帶了 v2 才有的欄位：明確拒絕，不靜默忽略（舊引擎不會使用這些設定）。"""
+    out = []
+    if graph_spec.get("settings") is not None:
+        out.append("settings 只在 mode=\"v2\" 的圖有效；要使用請在 graph_spec 加上 \"mode\": \"v2\"")
+    for nid, n in nodes.items():
+        for f in _V2_NODE_FIELDS.get(n.get("type"), ()):
+            if f in n:
+                out.append(f"節點 {nid}：{f} 只在 mode=\"v2\" 的圖有效；要使用請在 graph_spec 加上 \"mode\": \"v2\"")
+    return out
+
+
+def v2_issues(graph_spec: dict, nodes: dict) -> list[str]:
+    """v2 圖的額外驗證：settings、暖機與轉換、分支、上游策略（見 training/v2_inputs.py、engine_v2.py）。"""
+    from training import alignment as al
+    from training import cascade as cc
+    from training import v2_inputs as vi
+    from training.registry import warmup as wu
+
+    out = []
+    settings = graph_spec.get("settings") or {}
+    if not isinstance(settings, dict):
+        return ["settings 必須是物件"]
+    seed = settings.get("split_seed", 42)
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+        out.append("settings.split_seed 必須是 ≥ 0 的整數")
+    vr = settings.get("val_ratio", 0.2)
+    if not _finite_number(vr) or not 0.05 <= vr <= 0.5:
+        out.append("settings.val_ratio 必須在 0.05～0.5")
+    eps = (settings.get("warmup") or {}).get("epsilon", wu.DEFAULT_EPSILON)
+    if not _finite_number(eps) or not wu.EPSILON_RANGE[0] <= eps <= wu.EPSILON_RANGE[1]:
+        out.append(f"settings.warmup.epsilon 必須在 {wu.EPSILON_RANGE[0]:g}～{wu.EPSILON_RANGE[1]:g}")
+    wr = settings.get("exclusion_warn_ratio", 0.05)
+    if not _finite_number(wr) or not 0 <= wr <= 1:
+        out.append("settings.exclusion_warn_ratio 必須在 0～1")
+    out += al.alignment_issues(al.resolve_alignment(settings))
+    if out:
+        return out
+    for nid, n in nodes.items():
+        if n["type"] in ("feature", "label") and not isinstance(n.get("timeframe"), str):
+            out.append(f"節點 {nid}：timeframe 必須是字串（例如 tx_15m）")
+    if out:
+        return out
+    model_ids = {i for i, n in nodes.items() if n["type"] == "model"}
+    consumed = {r.node for i in model_ids for r in input_refs(nodes[i]) if r.node in model_ids}
+    for nid, n in nodes.items():
+        if n["type"] == "feature":
+            out += vi.feature_issues(nid, n, float(eps))
+        elif n["type"] == "model":
+            out += vi.branch_issues(nid, n, nodes)
+            if nid in consumed or n.get("upstream_policy") is not None:
+                out += cc.policy_issues(nid, n, settings)
+            if "split_strategy" in n and n["split_strategy"] not in ("random", "chronological"):
+                out.append(f"Model 節點 {nid}：split_strategy 必須是 random 或 chronological")
+    return out
 
 
 def _cycle_issues(edges: dict) -> list[str]:

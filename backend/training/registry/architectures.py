@@ -163,19 +163,23 @@ def load_model(key: str, weights: bytes, model_config: dict) -> dict:
 
 
 def train_model(key: str, X_train, y_train, X_val, y_val, params: dict, on_epoch=None,
-                task_type: str = "classification", preview_hook=None, n_classes: int | None = None) -> dict:
-    """訓練當下再驗證一次（涵蓋繞過 API 的 job）；n_classes 由 Label 決定（分類時），不是模型參數。"""
+                task_type: str = "classification", preview_hook=None, n_classes: int | None = None,
+                input_layout: dict | None = None) -> dict:
+    """訓練當下再驗證一次（涵蓋繞過 API 的 job）；n_classes 由 Label 決定（分類時），不是模型參數。
+    input_layout：v2 多分支的欄位配置（見 training/v2_inputs.py）；None＝單一輸入（舊行為，權重格式不變）。"""
     if key not in ARCHITECTURE_REGISTRY:
         raise ValueError(f"未登記的 architecture key: {key!r}，目前有：{sorted(ARCHITECTURE_REGISTRY)}")
     fn = ARCHITECTURE_REGISTRY[key]
     if key not in ARCHITECTURE_META:  # 測試用替身架構：沿用最簡簽名
         return fn(X_train, y_train, X_val, y_val, params, on_epoch, task_type, preview_hook=preview_hook)
     cfg = validate(key, params, {"task_type": task_type})
+    extra = {"input_layout": input_layout} if input_layout is not None else {}
     return fn(X_train, y_train, X_val, y_val, cfg, on_epoch, task_type, preview_hook=preview_hook,
-              n_classes=n_classes if task_type == "classification" else None)
+              n_classes=n_classes if task_type == "classification" else None, **extra)
 
 
 # 放在檔案最後：各 architecture 模組用上面的 register／register_loader 登記自己。
 # （torch／xgboost 只在函式內才匯入，API 容器匯入這個模組不需要它們。）
 from training.registry import lstm  # noqa: E402,F401
 from training.registry import xgboost_model  # noqa: E402,F401
+from training.registry import seq_models  # noqa: E402,F401

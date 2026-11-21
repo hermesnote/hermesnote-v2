@@ -72,7 +72,8 @@ class RegistryTests(unittest.TestCase):
     def test_list_available_exposes_schema_capabilities_slots(self):
         by_key = {a["key"]: a for a in architectures.list_available()}
         # 正式登記（帶 params_schema）的架構只有這兩個；其他測試模組可能暫時塞了替身架構
-        self.assertEqual(sorted(k for k, a in by_key.items() if a["params_schema"] is not None), ["lstm", "xgboost"])
+        self.assertEqual(sorted(k for k, a in by_key.items() if a["params_schema"] is not None),
+                         ["cnn_lstm", "gru", "lstm", "transformer", "xgboost"])
         lstm, xgb = by_key["lstm"], by_key["xgboost"]
         self.assertEqual(set(lstm["capabilities"].values()), {"configurable"})
         self.assertEqual(set(xgb["capabilities"].values()), {"fixed_off"})

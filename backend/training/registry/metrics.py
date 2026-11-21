@@ -80,6 +80,10 @@ register("roc_auc", label="ROC-AUC", direction="max", unit="ratio",
          description="二元為正類機率；多分類為 One-vs-Rest macro average")
 register("average_precision", label="Average Precision", direction="max", unit="ratio",
          description="AP（step 加權平均，不是梯形積分的 PR-AUC）；目前只實作二元分類")
+register("brier", label="Brier", direction="min", unit="ratio",
+         description="機率品質：二元 mean((p₁−y)²)；多分類 mean(Σ_k (p_k−1[y=k])²)（各類加總）")
+register("log_loss", label="Log loss", direction="min", unit="loss_space",
+         description="評估用對數損失（labels 固定為全部類別）")
 register("per_class", label="逐類別指標", shape="per_class", unit="ratio",
          description="各類別 precision／recall／f1／support")
 register("class_distribution", label="類別分布", shape="distribution", unit="count", fmt="int",
@@ -94,7 +98,7 @@ register_baseline("baseline_mean", key="train_mean", label="預測訓練集平�
 register_baseline("baseline_zero", key="zero", label="預測零")
 
 CLASSIFICATION_EVAL = ["accuracy", "balanced_accuracy", "macro_f1", "roc_auc", "average_precision",
-                       "per_class", "class_distribution", "confusion_matrix"]
+                       "brier", "log_loss", "per_class", "class_distribution", "confusion_matrix"]
 REGRESSION_EVAL = ["rmse", "mae", "mse", "r2"]
 
 

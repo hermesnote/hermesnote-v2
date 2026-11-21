@@ -176,10 +176,14 @@ def sequence_summary_label(bidirectional: bool, has_attention: bool) -> str:
     return head + ("，再與 Attention context 串接" if has_attention else "，直接接共享層")
 
 
-def build_net(n_features: int, cfg: dict, out_dim: int):
-    """out_dim：single 模式的輸出寬度（分類＝類別數、回歸＝1）；dual 模式忽略。"""
+def build_net(n_features: int, cfg: dict, out_dim: int, layout: dict | None = None):
+    """out_dim：single 模式的輸出寬度（分類＝類別數、回歸＝1）；dual 模式忽略。
+    layout：v2 多分支配置（training/v2_inputs.py）；None＝舊版單一 LSTM（權重格式不變）。"""
     import torch
     from torch import nn
+
+    if layout is not None:
+        return build_branch_net(cfg, out_dim, layout)
 
     layers, bidirectional, dual = cfg["lstm_layers"], bool(cfg["bidirectional"]), cfg["heads"] == "dual"
     mult = 2 if bidirectional else 1
@@ -224,6 +228,71 @@ def build_net(n_features: int, cfg: dict, out_dim: int):
             return out
 
     return LSTMModel()
+
+
+def build_branch_net(cfg: dict, out_dim: int, layout: dict):
+    """多分支：每個 lstm 分支各自一組 LSTM 堆疊（沿用節點的 lstm_layers／bidirectional／attention 設定），
+    last_value 分支直接取最後一根的特徵；各分支摘要 concat 後接共享層與輸出頭（合併方式目前只有 concat）。
+    輸入是 PackedWindows 打包的 (n, W_max, F_total)：分支 b 佔 cols[b]、右對齊在最後 W_b 步。"""
+    import torch
+    from torch import nn
+
+    layers, bidirectional, dual = cfg["lstm_layers"], bool(cfg["bidirectional"]), cfg["heads"] == "dual"
+    mult = 2 if bidirectional else 1
+    summary_dim = layers[-1]["units"] * mult
+    w_max = layout["w_max"]
+
+    class BranchModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.specs = layout["branches"]
+            self.encoders = nn.ModuleDict()
+            self.attns = nn.ModuleDict()
+            total = 0
+            for b in self.specs:
+                f = b["cols"][1] - b["cols"][0]
+                if b["encoder"] == "lstm":
+                    in_sizes = [f] + [layers[i]["units"] * mult for i in range(len(layers) - 1)]
+                    self.encoders[b["id"]] = nn.ModuleList([
+                        nn.LSTM(in_sizes[i], layers[i]["units"], batch_first=True, bidirectional=bidirectional)
+                        for i in range(len(layers))])
+                    ctx_dim = 0
+                    if cfg["attention"] is not None:
+                        self.attns[b["id"]], ctx_dim = attention_registry.build_checked(cfg["attention"], summary_dim)
+                    total += summary_dim + ctx_dim
+                else:
+                    total += f
+            self.drops = nn.ModuleList([nn.Dropout(layer["dropout"]) for layer in layers])
+            self.shared = nn.Linear(total, cfg["shared"]["dense"])
+            self.shared_drop = nn.Dropout(cfg["shared"]["dropout"])
+            if dual:
+                self.reg_head = nn.Linear(cfg["shared"]["dense"], 1)
+                self.dir_head = nn.Linear(cfg["shared"]["dense"], 1)
+            else:
+                self.head = nn.Linear(cfg["shared"]["dense"], out_dim)
+
+        def forward(self, x, return_attention: bool = False):
+            parts, alpha = [], None
+            for b in self.specs:
+                c0, c1 = b["cols"]
+                if b["encoder"] != "lstm":
+                    parts.append(x[:, -1, c0:c1])
+                    continue
+                seq, h_n = x[:, w_max - b["window"]:, c0:c1], None
+                for lstm, drop in zip(self.encoders[b["id"]], self.drops):
+                    seq, (h_n, _c) = lstm(seq)
+                    seq = drop(seq)
+                summary = self.drops[-1](torch.cat([h_n[0], h_n[1]], dim=-1) if bidirectional else h_n[0])
+                if b["id"] in self.attns:
+                    ctx, a = self.attns[b["id"]](seq)
+                    alpha = a if alpha is None else alpha
+                    summary = torch.cat([ctx, summary], dim=1)
+                parts.append(summary)
+            z = self.shared_drop(torch.relu(self.shared(torch.cat(parts, dim=1))))
+            out = (self.reg_head(z).squeeze(-1), self.dir_head(z).squeeze(-1)) if dual else self.head(z)
+            return (out, alpha) if return_attention else out
+
+    return BranchModel()
 
 
 def _forward_batches(model, X, device, batch: int = 2048):
@@ -323,8 +392,11 @@ def _full_evaluation(mode: str, preds: dict, X_val, targets: dict, train_targets
           metric_specs=metric_specs,
           lazy_windows=True)
 def train_lstm(X_train, y_train, X_val, y_val, cfg: dict, on_epoch, task_type: str = "classification", *,
-               preview_hook=None, n_classes: int | None = None) -> dict:
-    """LSTM：方向／Attention／輸出頭三軸獨立組合（見模組說明）。cfg 是 validate() 解析後的設定。"""
+               preview_hook=None, n_classes: int | None = None, input_layout: dict | None = None,
+               _builder=None, _arch: str | None = None, _summary: str | None = None) -> dict:
+    """LSTM：方向／Attention／輸出頭三軸獨立組合（見模組說明）。cfg 是 validate() 解析後的設定。
+    _builder／_arch／_summary：其他序列模型（training/registry/seq_models.py）共用這個訓練迴圈時指定網路、
+    架構名稱與摘要說明；LSTM 本身不傳（行為與權重格式不變）。"""
     import torch
     from torch import nn
 
@@ -351,7 +423,7 @@ def train_lstm(X_train, y_train, X_val, y_val, cfg: dict, on_epoch, task_type: s
     tr_t, va_t = targets_for(y_train), targets_for(y_val)
 
     out_dim = n_classes if mode == "cls" else 1
-    model = build_net(X_train.shape[-1], cfg, out_dim).to(device)
+    model = (_builder or build_net)(X_train.shape[-1], cfg, out_dim, input_layout).to(device)
     opt = build_optimizer(model.parameters(), cfg["optimizer"])
 
     if mode == "cls":
@@ -457,7 +529,7 @@ def train_lstm(X_train, y_train, X_val, y_val, cfg: dict, on_epoch, task_type: s
     final_best, weights_best, preds, eval_best = finalize(best_state)
 
     attention_meta = None
-    if cfg["attention"] is not None:
+    if cfg.get("attention") is not None:
         entry = attention_registry.ATTENTION_REGISTRY[cfg["attention"]["type"]]
         attention_meta = {k: entry[k] for k in ("key", "label", "query_source", "combine", "output_kind")}
 
@@ -475,8 +547,10 @@ def train_lstm(X_train, y_train, X_val, y_val, cfg: dict, on_epoch, task_type: s
         "model_config": {
             "n_features": int(X_train.shape[-1]), "config": cfg, "mode": mode, "out_dim": out_dim,
             "n_classes": n_classes if mode == "cls" else None, "target_scaling": scaling,
-            "sequence_summary": sequence_summary_label(cfg["bidirectional"], cfg["attention"] is not None),
+            "sequence_summary": _summary or sequence_summary_label(cfg["bidirectional"], cfg["attention"] is not None),
             "attention_meta": attention_meta,
+            **({"input_layout": input_layout} if input_layout else {}),
+            **({"arch": _arch} if _arch else {}),
         },
     }
 
@@ -486,7 +560,8 @@ def load_lstm(weights: bytes, model_config: dict) -> dict:
     """依保存的 model_config 重建同一個網路（同一個 build_net），只做推論（CPU）。"""
     import torch
 
-    model = build_net(model_config["n_features"], model_config["config"], model_config["out_dim"])
+    model = build_net(model_config["n_features"], model_config["config"], model_config["out_dim"],
+                      model_config.get("input_layout"))
     model.load_state_dict(torch.load(io.BytesIO(weights), map_location="cpu"))
     model.eval()
     return _predictors(model, model_config["mode"], model_config["target_scaling"], "cpu")

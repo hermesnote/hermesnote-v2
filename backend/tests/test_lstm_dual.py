@@ -180,7 +180,7 @@ class DescribeAndSubmitTests(unittest.TestCase):
 
         created = []
 
-        async def fake_create(spec, job_type="train", phase=None, parent_job_id=None, warnings=None):
+        async def fake_create(spec, job_type="train", phase=None, parent_job_id=None, warnings=None, requested_by=None):
             created.append(spec)
             return "job-1"
 
@@ -471,7 +471,7 @@ class GraphIntegrationTests(unittest.TestCase):
         finally:
             worker_mod.write_progress, worker_mod.save_artifacts_for_job, worker_mod.save_preview_sample = orig
         summary = result["dual"]
-        self.assertEqual(sorted(summary), ["device", "evaluations", "final_metrics", "metric_specs", "output_specs",
+        self.assertEqual(sorted(summary), ["device", "evaluations", "final_metrics", "metric_specs", "output_specs", "train_stats",
                                            "training_meta"])
         # evaluations（best／last × 兩個輸出頭）＋metric_specs（含指標定義）仍是 O(類別數) 的小量級
         self.assertLess(len(json.dumps(result)), 20000)
@@ -617,6 +617,8 @@ class InferenceAndStorageTests(unittest.TestCase):
         class Conn:
             autocommit = False
             def cursor(self): return Cur()
+            def __enter__(self): return self  # psycopg2：with conn＝一個交易
+            def __exit__(self, *a): return False
             def close(self): pass
 
         orig_connect, orig_ev = inference_store.psycopg2.connect, inference_store.execute_values
@@ -655,6 +657,8 @@ class ProgressWriteTests(unittest.TestCase):
         class Conn:
             autocommit = False
             def cursor(self): return Cur()
+            def __enter__(self): return self  # psycopg2：with conn＝一個交易
+            def __exit__(self, *a): return False
             def close(self): pass
 
         orig = progress.psycopg2.connect

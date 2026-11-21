@@ -31,12 +31,30 @@ PARAMS_SCHEMA = [
 ]
 
 
-def _predictors(booster, is_cls: bool, n_classes: int) -> dict:
+def layout_columns(layout: dict | None):
+    """多分支（v2）：攤平後真正有值的欄位（每個分支只取自己的欄位與最後 W_b 步，不含左側補 0）。None＝全部。"""
+    if not layout:
+        return None
+    w_max, f_total = layout["w_max"], layout["f_total"]
+    cols = []
+    for b in layout["branches"]:
+        c0, c1 = b["cols"]
+        for step in range(w_max - b["window"], w_max):
+            cols.extend(step * f_total + c for c in range(c0, c1))
+    return np.asarray(cols, dtype=np.int64)
+
+
+def _flat(X, cols):
+    X2 = np.asarray(X).reshape(len(X), -1)
+    return X2 if cols is None else X2[:, cols]
+
+
+def _predictors(booster, is_cls: bool, n_classes: int, cols=None) -> dict:
     """訓練結束與重載推論共用：直接用 booster（best 權重已經截好樹數），不再靠 iteration_range。"""
     import xgboost as xgb
 
     def raw(X):
-        return booster.predict(xgb.DMatrix(np.asarray(X).reshape(len(X), -1)))
+        return booster.predict(xgb.DMatrix(_flat(X, cols)))
 
     if not is_cls:
         return {"predict": raw}
@@ -74,14 +92,15 @@ def metric_specs(node: dict, label_node: dict, task_type: str) -> dict:
           capabilities={"bidirectional": "fixed_off", "attention": "fixed_off", "dual_head": "fixed_off",
                         "optimizer": "fixed_off"})
 def train_xgboost(X_train, y_train, X_val, y_val, cfg: dict, on_epoch, task_type: str = "classification", *,
-                  preview_hook=None, n_classes: int | None = None) -> dict:
+                  preview_hook=None, n_classes: int | None = None, input_layout: dict | None = None) -> dict:
     """XGBoost 梯度提升樹，分類或回歸；參數見 params_schema。"""
     import xgboost as xgb
 
     is_cls = task_type == "classification"
     n_classes = int(n_classes or 2)
-    X_train_2d = np.asarray(X_train).reshape(len(X_train), -1)
-    X_val_2d = np.asarray(X_val).reshape(len(X_val), -1)
+    cols = layout_columns(input_layout)
+    X_train_2d = _flat(X_train, cols)
+    X_val_2d = _flat(X_val, cols)
     patience = cfg["early_stopping"]["patience"]
     rng = np.random.default_rng(cfg["seed"])
 
@@ -133,9 +152,9 @@ def train_xgboost(X_train, y_train, X_val, y_val, cfg: dict, on_epoch, task_type
     best_booster = booster[: best_iteration + 1]
 
     def finalize(b):
-        preds = _predictors(b, is_cls, n_classes)
+        preds = _predictors(b, is_cls, n_classes, cols)
         if is_cls:
-            proba = preds["predict_proba"](X_val_2d)
+            proba = preds["predict_proba"](X_val)
             eps = 1e-15
             logloss = float(-np.mean(np.log(np.clip(proba[np.arange(len(y_val)), np.asarray(y_val, int)], eps, 1))))
             metrics = {f"val_{loss_metric}": logloss,
@@ -143,7 +162,7 @@ def train_xgboost(X_train, y_train, X_val, y_val, cfg: dict, on_epoch, task_type
             evaluation = classification_evaluation(y_val, proba.argmax(axis=1), y_proba=proba,
                                                    n_classes=n_classes, y_train=y_train)
         else:
-            pred = preds["predict"](X_val_2d)
+            pred = preds["predict"](X_val)
             metrics = {"val_rmse": float(np.sqrt(np.mean((pred - y_val) ** 2))),
                        "val_mae": float(np.mean(np.abs(pred - y_val)))}
             evaluation = regression_evaluation(y_val, pred, y_train=y_train)
@@ -162,7 +181,8 @@ def train_xgboost(X_train, y_train, X_val, y_val, cfg: dict, on_epoch, task_type
         **preds, "device": "cpu",
         "weights": weights_best, "weights_last": weights_last,
         "model_config": {"config": cfg, "is_cls": is_cls, "n_classes": n_classes if is_cls else None,
-                         "best_round": best_iteration, "rounds_run": rounds},
+                         "best_round": best_iteration, "rounds_run": rounds,
+                         **({"input_layout": input_layout} if input_layout else {})},
     }
 
 
@@ -172,4 +192,5 @@ def load_xgboost(weights: bytes, model_config: dict) -> dict:
 
     booster = xgb.Booster()
     booster.load_model(bytearray(weights))
-    return _predictors(booster, model_config["is_cls"], model_config.get("n_classes") or 2)
+    return _predictors(booster, model_config["is_cls"], model_config.get("n_classes") or 2,
+                       layout_columns(model_config.get("input_layout")))

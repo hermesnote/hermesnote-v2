@@ -141,7 +141,7 @@ async def _load_dataframes(graph_spec: dict) -> dict:
 # 評估：訓練回傳的完整評估報告（evaluation {best,last}，見 training/evaluation.py）轉成通用的
 # evaluations 清單（標明模型節點、輸出頭、資料集、評估時點與基準）＋metric_specs 後保存，
 # 大小是 O(類別數)；原始 evaluation 不再另存（見 training/evaluation_records.py）。
-_SUMMARY_KEYS = {"final_metrics", "device", "training_meta", "output_specs"}
+_SUMMARY_KEYS = {"final_metrics", "device", "training_meta", "output_specs", "train_stats"}
 
 
 def _summarize(results: dict, graph_spec: dict, phase=None) -> dict:
@@ -191,6 +191,13 @@ async def run_one(job_id: str, graph_spec: dict, phase=None):
     # 直接寫進 model_training_jobs 的任務跟舊的 pending 列；失敗會由 main_loop 標記成 failed，
     # 訊息就是驗證回報的全部問題。
     validate_graph_spec(graph_spec)
+    from training.v2_inputs import is_v2
+
+    if is_v2(graph_spec):
+        from training.worker_v2 import run_train_job
+
+        await run_train_job(job_id, graph_spec, phase)
+        return
     dfs = await _load_dataframes(graph_spec)
     await job_store.save_data_report(job_id, data_report(dfs, graph_spec))
     result = await asyncio.to_thread(run_one_sync, job_id, graph_spec, dfs, phase)
@@ -263,7 +270,7 @@ def run_infer_sync(job_id: str, target_job_id: str, target_node_id: str, dfs: di
     return summary
 
 
-async def run_one_infer(job_id: str, infer_spec: dict):
+async def run_one_infer(job_id: str, infer_spec: dict, phase=None):
     """infer_spec: {"target_job_id", "target_node_id", "start", "end"}——載入已保存的模型
     對新區間做推論，不重新訓練，跟 run_one() 共用同一個 job 佇列/狀態機制，只是執行內容不同。
 
@@ -278,6 +285,10 @@ async def run_one_infer(job_id: str, infer_spec: dict):
     start = date.fromisoformat(infer_spec["start"])
     end = date.fromisoformat(infer_spec["end"])
     use_weights = infer_spec["use_weights"]
+    from training.worker_v2 import run_infer_job
+
+    if await run_infer_job(job_id, infer_spec, phase):
+        return
     dfs = await _load_dataframes_for_infer(target_job_id, target_node_id, start, end)
     await job_store.save_data_report(job_id, data_report(dfs, infer_spec))
     summary = await asyncio.to_thread(run_infer_sync, job_id, target_job_id, target_node_id, dfs, use_weights)
@@ -285,7 +296,93 @@ async def run_one_infer(job_id: str, infer_spec: dict):
     print(f"[worker] infer job {job_id} done（{summary['count']} 筆預測已分批存入 model_inference_predictions）", flush=True)
 
 
+LOCK_RETRY_SEC = 15
+LOCK_CHECK_SEC = 10            # watchdog 檢查間隔；加上查詢逾時（job_store.LOCK_QUERY_TIMEOUT_SEC＝5）最多 15 秒
+LOCK_LOST_EXIT_CODE = 70
+# 取得鎖後、回收與認領前的等待：舊 worker 若剛失去鎖，連線中斷通知會讓它立即結束，最慢也會在 watchdog 下一次檢查
+# （≤ LOCK_CHECK_SEC＋逾時）結束。這段等待只是輔助：排他靠的是寫入的所有權檢查（training/fence.py）與在鎖連線上認領。
+TAKEOVER_GRACE_SEC = int(os.getenv("WORKER_TAKEOVER_GRACE_SEC", "30"))
+
+
+def worker_identity() -> dict:
+    """這個 worker 程序的身分：實例 ID 每次啟動都不同（寫進認領任務的 env_fingerprint.worker）。"""
+    import socket
+    import uuid
+    from datetime import datetime, timezone
+
+    return {"instance": str(uuid.uuid4()), "pid": os.getpid(), "host": socket.gethostname(),
+            "name": os.getenv("WORKER_NAME") or socket.gethostname(),
+            "started_at": datetime.now(timezone.utc).isoformat()}
+
+
+# ── 峰值記憶體（Linux：/proc/self/status 的 VmHWM；寫 5 到 clear_refs 可在每筆任務開始時歸零） ──────
+def reset_peak_rss() -> bool:
+    try:
+        with open("/proc/self/clear_refs", "w") as f:
+            f.write("5")
+        return True
+    except OSError:
+        return False
+
+
+def read_peak_rss() -> int | None:
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        return None
+    return None
+
+
+def _exit_lock_lost(reason: str) -> None:
+    print(f"[worker] 失去 worker 鎖（{reason}），立即結束程序，不再寫入任何結果", flush=True)
+    os._exit(LOCK_LOST_EXIT_CODE)
+
+
+async def _lock_watchdog(lock) -> None:
+    """定期確認仍持有 worker 鎖（查詢有逾時，網路中斷不會卡住）；失去鎖就立即結束程序。
+    容器重啟後的新實例取得鎖時，會把這筆任務回收成「worker 中斷，原因未判定」。"""
+    while True:
+        await asyncio.sleep(LOCK_CHECK_SEC)
+        if not await lock.alive():
+            _exit_lock_lost("定期檢查失敗或逾時")
+
+
+async def acquire_lock_and_reclaim(identity: dict):
+    """取得單一實例鎖（取不到就等，不認領任務）→ 註冊連線中斷通知 → 等待接手緩衝 → 回收舊實例殘留的 running。"""
+    lock = None
+    while lock is None:
+        lock = await job_store.acquire_worker_lock()
+        if lock is None:
+            print(f"[worker] worker 鎖由其他程序持有（可能有另一個 worker 正在執行，或舊連線尚未被資料庫判定中斷），"
+                  f"{LOCK_RETRY_SEC} 秒後重試；期間不認領任何任務", flush=True)
+            await asyncio.sleep(LOCK_RETRY_SEC)
+    try:
+        lock.conn.add_termination_listener(lambda conn: _exit_lock_lost("鎖連線已中斷"))
+    except Exception as e:  # noqa: BLE001 — 沒有通知仍有 watchdog
+        print(f"[worker] 無法註冊鎖連線中斷通知（仍有定期檢查）：{e}", flush=True)
+    print(f"[worker] 取得 worker 鎖（實例 {identity['instance']}），等待 {TAKEOVER_GRACE_SEC} 秒後回收殘留任務", flush=True)
+    await asyncio.sleep(TAKEOVER_GRACE_SEC)
+    reclaimed = await lock.reclaim_orphans(identity["instance"])
+    print(f"[worker] 回收殘留 running {len(reclaimed)} 筆"
+          + "".join(f"\n[worker]   {r['id']}（原實例 {r['instance']}）" for r in reclaimed), flush=True)
+    return lock
+
+
 async def main_loop():
+    from training import fence
+
+    identity = worker_identity()
+    fence.INSTANCE = identity["instance"]
+    lock = await acquire_lock_and_reclaim(identity)
+    watchdog = asyncio.create_task(_lock_watchdog(lock))  # noqa: F841 — 保持參照，程序存續期間持續檢查
+    peak = {"reset": False}
+    job_store.RESOURCE_PROBE = lambda: (
+        {"peak_rss_bytes": v, "peak_rss_gib": round(v / 2 ** 30, 3), "source": "VmHWM",
+         "scope": "this_job" if peak["reset"] else "process_lifetime", "worker_instance": identity["instance"]}
+        if (v := read_peak_rss()) is not None else None)
     print("[worker] training worker started, polling model_training_jobs(status='pending')", flush=True)
     while True:
         job = await job_store.fetch_next_pending()
@@ -299,22 +396,31 @@ async def main_loop():
             await asyncio.sleep(GPU_BUSY_RETRY_SEC)
             continue
 
+        if not await lock.alive():  # 認領前再確認一次（認領 SQL 本身也會在鎖連線上確認）
+            _exit_lock_lost("認領前檢查")
         import torch
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        await job_store.mark_running(job["id"], device, env_fingerprint())
+        job = await lock.claim_next_pending(device, {**env_fingerprint(), "worker": identity})
+        if job is None:  # 已被取消、被搶先或失去鎖：不執行
+            continue
+        fence.JOB = job["id"]
         print(f"[worker] picked up job {job['id']} (job_type={job['job_type']}) GPU：{reason}", flush=True)
+        peak["reset"] = reset_peak_rss()
         try:
             if job["job_type"] == "infer":
-                await run_one_infer(job["id"], job["graph_spec"])
+                await run_one_infer(job["id"], job["graph_spec"], job.get("phase"))
             else:
                 await run_one(job["id"], job["graph_spec"], job.get("phase"))
         except Exception as e:
             print(f"[worker] job {job['id']} failed: {e}", flush=True)
-            await job_store.mark_failed(job["id"], str(e))
+            if not await job_store.mark_failed_by_worker(job["id"], str(e)):
+                print(f"[worker] 任務 {job['id']} 已不是本 worker 執行中的狀態，失敗訊息不寫入", flush=True)
         finally:
+            fence.JOB = None
             # 任務結束（成功或失敗）後立刻釋放模型引用與 CUDA 快取，下一筆任務的顯存判斷才不會把
             # 這筆留下的快取算成外部佔用
             release_gpu_memory()
+
 
 
 if __name__ == "__main__":

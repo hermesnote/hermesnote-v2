@@ -11,6 +11,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import tests  # noqa: E402,F401 — 正式 hermesnote DB 防護（tests/__init__.py），必須在 training／services 之前
 from training import artifacts  # noqa: E402
 
 SPEC = {
@@ -49,6 +50,12 @@ class _FakeConn:
 
     def cursor(self):
         return _FakeCursor(self.captured, self.row)
+
+    def __enter__(self):  # psycopg2：with conn＝一個交易
+        return self
+
+    def __exit__(self, *a):
+        return False
 
     def close(self):
         pass

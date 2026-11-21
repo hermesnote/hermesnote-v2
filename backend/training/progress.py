@@ -47,11 +47,14 @@ def write_progress(job_id: str, node_id: str, epoch: int, metrics: dict) -> None
     NOTIFY 訊息是扁平格式（loss、accuracy…在最上層），擴充指標另外以 `metrics` 巢狀物件附上
     （跟資料庫歷史查詢 GET /progress 的形狀一致）。
     """
+    from training import fence
+
     core, extras = split_metrics(metrics)
     conn = psycopg2.connect(_SYNC_DATABASE_URL)
     try:
-        conn.autocommit = True
-        with conn.cursor() as cur:
+        # 所有權檢查與寫入在同一個交易（見 training/fence.py）；NOTIFY 也在提交時才送出
+        with conn, conn.cursor() as cur:
+            fence.check_sync(cur, job_id)
             cur.execute(
                 """
                 INSERT INTO model_training_progress

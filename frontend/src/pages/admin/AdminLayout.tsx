@@ -10,6 +10,7 @@ const NAV_ITEMS = [
   { to: "/admin/mcp", label: "MCP 服務" },
   { to: "/admin/trading", label: "交易系統" },
   { to: "/admin/model", label: "模型訓練" },
+  { to: "/admin/model-experiments", label: "模型實驗" },
   { to: "/admin/quant", label: "量化回測" },
   { to: "/admin/ledger", label: "家庭理財" },
 ];

@@ -87,7 +87,8 @@ class RegistryAndCompatibilityTests(unittest.TestCase):
         self.assertEqual(by_key["xgboost"]["capabilities"]["optimizer"], "fixed_off")
         adam = {c["key"]: c for c in architectures.list_components("optimizer")}["adam"]
         self.assertEqual([f["name"] for f in adam["params_schema"]], ["lr", "weight_decay", "beta1", "beta2", "eps"])
-        self.assertEqual(adam["slot_compatibility"], [["lstm", "optimizer"]])
+        self.assertEqual(adam["slot_compatibility"], [["lstm", "optimizer"], ["gru", "optimizer"],
+                                                   ["cnn_lstm", "optimizer"], ["transformer", "optimizer"]])
         with self.assertRaises(KeyError):
             architectures.list_components("nope")
 

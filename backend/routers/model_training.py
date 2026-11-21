@@ -10,9 +10,10 @@ import json
 from datetime import date
 
 import asyncpg
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
+from auth import principal_id, require_model_writer
 from services import model_artifacts
 from services.hermesnote_db import HERMESNOTE_DATABASE_URL
 from services.quotes import fetch_ohlcv_rows
@@ -61,7 +62,7 @@ class TrainRequest(BaseModel):
 
 
 @router.post("/train")
-async def start_training(body: TrainRequest):
+async def start_training(body: TrainRequest, principal: dict = Depends(require_model_writer("model:train"))):
     if body.phase is not None and body.phase not in (1, 2):
         raise HTTPException(status_code=400, detail="phase 只能是 1 或 2；Phase 3 是推論，請用 POST /api/model/infer")
 
@@ -82,7 +83,8 @@ async def start_training(body: TrainRequest):
         except GraphValidationError as e:
             raise HTTPException(status_code=400, detail=f"繼承自母任務的圖不合法：{e}")
         warnings = period_warnings(graph_spec["start"], graph_spec["end"])
-        job_id = await job_store.create_job(graph_spec, phase=2, parent_job_id=body.parent_job_id, warnings=warnings)
+        job_id = await job_store.create_job(graph_spec, phase=2, parent_job_id=body.parent_job_id, warnings=warnings,
+                                            requested_by=principal_id(principal))
         return {"job_id": job_id, "warnings": warnings}
 
     # 後端也要擋不合法的圖，不能只靠前端擋——Agent 可能直接打 API 送 graph_spec，不會經過前端表單。
@@ -98,8 +100,15 @@ async def start_training(body: TrainRequest):
         warnings = period_warnings(body.start, body.end)
     except ValueError:
         raise HTTPException(status_code=400, detail="end 必須是 YYYY-MM-DD")
-    job_id = await job_store.create_job(graph_spec, phase=body.phase, warnings=warnings)
+    job_id = await job_store.create_job(graph_spec, phase=body.phase, warnings=warnings, requested_by=principal_id(principal))
     return {"job_id": job_id, "warnings": warnings}
+
+
+@router.get("/job-summaries")
+async def list_training_job_summaries(limit: int = 1000):
+    """輕量任務清單（訓練頁下拉選單用）：[{job_id, job_type, status, created_at}]，新到舊，上限 5000 筆。
+    要完整內容（圖、結果、資料紀錄）請用 GET /jobs/{job_id}。"""
+    return await job_store.list_job_summaries(max(1, min(int(limit), 5000)))
 
 
 @router.get("/jobs")
@@ -117,7 +126,7 @@ async def get_training_job(job_id: str):
 
 
 @router.delete("/jobs/{job_id}")
-async def delete_training_job(job_id: str):
+async def delete_training_job(job_id: str, principal: dict = Depends(require_model_writer("model:manage"))):
     """刪掉一筆訓練紀錄（含它的進度、已保存的模型權重，DB 是 CASCADE）。
 
     主要給「送出後容器崩潰、狀態永遠卡在 running/pending 的孤兒 job」清理用——這裡
@@ -136,7 +145,7 @@ async def delete_training_job(job_id: str):
 
 
 @router.post("/jobs/{job_id}/cancel")
-async def cancel_training_job(job_id: str):
+async def cancel_training_job(job_id: str, principal: dict = Depends(require_model_writer("model:manage"))):
     """把一筆 pending/running 的 job 標記成失敗（使用者手動中斷）。
 
     只處理 DB 狀態，不會真的把訓練容器裡的 process 砍掉——這裡的 worker 是單一
@@ -237,7 +246,7 @@ class InferRequest(BaseModel):
 
 
 @router.post("/infer")
-async def start_inference(body: InferRequest):
+async def start_inference(body: InferRequest, principal: dict = Depends(require_model_writer("model:infer"))):
     if body.use_weights not in ("best", "last"):
         raise HTTPException(status_code=400, detail=f'use_weights 必須是 "best" 或 "last"，收到 {body.use_weights!r}')
     target_node_id = body.target_node_id
@@ -283,8 +292,16 @@ async def start_inference(body: InferRequest):
     job_id = await job_store.create_job(
         infer_spec, job_type="infer",
         phase=body.phase, parent_job_id=body.target_job_id if body.phase == 3 else None,
-        warnings=warnings,
+        warnings=warnings, requested_by=principal_id(principal),
     )
+    if body.phase == 3:
+        # holdout 使用紀錄（每次推論、每次評估各一筆，不限次數；見 training/experiment_store.py）
+        from training import experiment_store
+
+        await experiment_store.write_holdout_usage(
+            "inference", job_id=job_id, parent_job_id=body.target_job_id, start=body.start, end=body.end,
+            detail={"weights": ["best", "last"], "use_weights": body.use_weights, "entry": "/api/model/infer",
+                    "requested_by": principal_id(principal)})
     return {"job_id": job_id, "warnings": warnings}
 
 
@@ -298,7 +315,8 @@ class KeepArtifactRequest(BaseModel):
 
 
 @router.post("/artifacts/{job_id}/{node_id}/keep")
-async def keep_model_artifact(job_id: str, node_id: str, body: KeepArtifactRequest):
+async def keep_model_artifact(job_id: str, node_id: str, body: KeepArtifactRequest,
+                              principal: dict = Depends(require_model_writer("model:manage"))):
     ok = await model_artifacts.mark_kept(job_id, node_id, body.kept)
     if not ok:
         raise HTTPException(status_code=404, detail="找不到這個模型產物")

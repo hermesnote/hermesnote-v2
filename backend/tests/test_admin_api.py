@@ -10,6 +10,7 @@ from unittest import mock
 import requests
 from fastapi.testclient import TestClient
 
+import tests  # noqa: E402,F401 — 正式 hermesnote DB 防護（tests/__init__.py），必須在 training／services 之前
 import main
 from auth import get_current_user
 from routers import admin as admin_router

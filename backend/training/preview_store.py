@@ -67,11 +67,14 @@ def _write_sample_sync(job_id: str, node_id: str, preview: dict) -> None:
     都只會讓這一筆預覽寫入失敗，不會拖累其他佇列裡的項目，也不會拖累訓練本身
     （訓練執行緒早就在 save_preview_sample() 那一刻就繼續往下跑了）。
     """
+    from training import fence
+
     conn = psycopg2.connect(_SYNC_DATABASE_URL, connect_timeout=_CONNECT_TIMEOUT_SEC)
     try:
-        conn.autocommit = True
-        with conn.cursor() as cur:
-            cur.execute(f"SET statement_timeout = {_STATEMENT_TIMEOUT_MS}")
+        # 所有權檢查與寫入在同一個交易（見 training/fence.py）；用這筆預覽自己的 job_id（佇列取出時可能已換下一筆任務）
+        with conn, conn.cursor() as cur:
+            cur.execute(f"SET LOCAL statement_timeout = {_STATEMENT_TIMEOUT_MS}")
+            fence.check_sync(cur, job_id)
             cur.execute(
                 """
                 INSERT INTO model_training_preview_samples

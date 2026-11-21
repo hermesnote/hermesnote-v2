@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { modelWriteFetch } from "../../../auth/AuthContext";
 import {
   ReactFlow,
   Background,
@@ -307,7 +308,7 @@ export default function ModelSettings() {
     // 卡在 running/pending 永遠不會結束的孤兒 job。如果這筆有收藏的模型，
     // 權重會跟著 DB 紀錄一起被刪掉（CASCADE），先跟使用者確認一次再送。
     if (!window.confirm("確定要刪除這筆訓練紀錄？如果有收藏的模型，權重也會一併刪除，且無法復原。")) return;
-    fetch(`${API_BASE}/api/model/jobs/${jobId}`, { method: "DELETE" })
+    modelWriteFetch(`${API_BASE}/api/model/jobs/${jobId}`, { method: "DELETE" })
       .then((res) => {
         if (!res.ok) return res.json().then((j) => { throw new Error(j.detail || "刪除失敗"); });
         refreshHistory();
@@ -322,7 +323,7 @@ export default function ModelSettings() {
     // process 砍掉，需要另外在 NAS 上手動重啟訓練容器（docker restart hermesnote-training），
     // 這支 API 沒有權限（也刻意不給它權限）觸發那個動作。
     if (!window.confirm("標記這筆為已中斷？\n\n注意：這只會更新畫面上的狀態，不會真的中斷背景還在跑的訓練——如果它真的卡住了，需要你自己在 NAS 上重啟訓練容器（docker restart hermesnote-training）才會真的釋放 GPU/記憶體。")) return;
-    fetch(`${API_BASE}/api/model/jobs/${jobId}/cancel`, { method: "POST" })
+    modelWriteFetch(`${API_BASE}/api/model/jobs/${jobId}/cancel`, { method: "POST" })
       .then((res) => {
         if (!res.ok) return res.json().then((j) => { throw new Error(j.detail || "取消失敗"); });
         refreshHistory();
@@ -332,7 +333,7 @@ export default function ModelSettings() {
   }
 
   function handleToggleKeep(jobId: string, nodeId: string, currentlyKept: boolean) {
-    fetch(`${API_BASE}/api/model/artifacts/${jobId}/${nodeId}/keep`, {
+    modelWriteFetch(`${API_BASE}/api/model/artifacts/${jobId}/${nodeId}/keep`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ kept: !currentlyKept }),
@@ -344,7 +345,7 @@ export default function ModelSettings() {
   function handleStartInfer() {
     if (!inferTarget) return;
     setInferError("");
-    fetch(`${API_BASE}/api/model/infer`, {
+    modelWriteFetch(`${API_BASE}/api/model/infer`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -491,7 +492,7 @@ export default function ModelSettings() {
     setSubmitNotice([]);
     const graphSpec = buildGraphSpec();
 
-    fetch(`${API_BASE}/api/model/train`, {
+    modelWriteFetch(`${API_BASE}/api/model/train`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       // 從這個表單建立的訓練，一律標成教授三階段協定的 Phase 1（random 切分）——
@@ -513,7 +514,7 @@ export default function ModelSettings() {
 
   function handleAdvancePhase2(parentJobId: string) {
     setSubmitError("");
-    fetch(`${API_BASE}/api/model/train`, {
+    modelWriteFetch(`${API_BASE}/api/model/train`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ start: "", end: "", nodes: [], phase: 2, parent_job_id: parentJobId }),
@@ -552,7 +553,7 @@ export default function ModelSettings() {
       url = `${API_BASE}/api/model/train`;
       body = { start: job.graph_spec.start, end: job.graph_spec.end, nodes: job.graph_spec.nodes, phase: job.phase };
     }
-    fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+    modelWriteFetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
       .then(async (res) => {
         if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || "重跑失敗");
         noticeFrom(await res.json().catch(() => ({})));

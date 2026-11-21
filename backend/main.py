@@ -11,6 +11,7 @@ from routers.admin import router as admin_router
 from routers.auth import router as auth_router
 from routers.indicators import router as indicators_router
 from routers.model_training import router as model_training_router
+from routers.model_experiments import router as model_experiments_router
 from routers.strategy import router as strategy_router
 from services.backtest_demo import compute_indicator_backtest
 from services.quotes import QUOTES_DATABASE_URL, fetch_ohlcv_rows, quotes_table
@@ -33,6 +34,7 @@ app.include_router(admin_router)
 app.include_router(indicators_router)
 app.include_router(strategy_router)
 app.include_router(model_training_router)
+app.include_router(model_experiments_router)
 
 
 @app.get("/health")

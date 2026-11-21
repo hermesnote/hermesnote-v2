@@ -89,6 +89,25 @@ def talib_indicator(df, params: dict) -> np.ndarray:
     return _as_2d(out)
 
 
+@register("candle_parts")
+def candle_parts(df, params: dict | None = None) -> np.ndarray:
+    """Custom > K 棒形態（點數）：三欄＝實體 abs(C−O)、上影 H−max(O,C)、下影 min(O,C)−L，只用當根資料，
+    不需要參數。"""
+    o, h, l, c = (df[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close"))
+    return np.stack([np.abs(c - o), h - np.maximum(o, c), np.minimum(o, c) - l], axis=1)
+
+
+@register("price_position")
+def price_position(df, params: dict) -> np.ndarray:
+    """Custom > 價格位置（點數）：兩欄＝上界 − 當根收盤、當根收盤 − 下界。params.bounds 與 first_crossing 標籤
+    同一種設定（見 training/registry/bounds.py），兩邊用同一份就保證上下界一致。暖機＝上下界指標較長的那個。"""
+    from training.registry import bounds as bd
+
+    upper, lower = bd.compute(df, params.get("bounds"))
+    close = df["close"].to_numpy(dtype=float)
+    return np.stack([upper - close, close - lower], axis=1)
+
+
 def _fetch_saved_strategy_sync(saved_id: str) -> dict:
     """同步查詢（訓練 worker 的執行緒沒有事件迴圈，用 psycopg2，跟 progress.py 同一套做法）。"""
     import os

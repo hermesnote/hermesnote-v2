@@ -78,6 +78,7 @@ type ReadReport = {
   excluded_sessions: string[]; n_excluded: number; excluded_trading_days: string[];
   sessions?: Record<string, number>; rule_versions?: Record<string, number>;
   n_gaps?: number; n_missing_bars?: number; first_datetime?: string; last_datetime?: string;
+  lookback?: { requested_bars: number; loaded_bars: number; load_from: string; shortfall: number } | null;
 };
 type JobWarning = { code: string; message: string };
 type DataReport = {
@@ -85,7 +86,11 @@ type DataReport = {
   period: { start: string; end: string };
   research_data_end: string;
   warnings: JobWarning[];
-  available_time: { source: string; publication_delay_sec: number; delay_status: string };
+  available_time: { source: string; publication_delay_sec?: number; delay_status: string;
+    delays?: Record<string, { sec: number; status: string; note?: string }> };
+  pipeline?: string;
+  history_requirements?: { bars: Record<string, number>; anchors: Record<string, string>; epsilon: number };
+  alignment?: { allow_previous_session: boolean; max_sessions_back: number | null; max_age_sec: number | null };
   timeframes: Record<string, ReadReport | null>;
 };
 
@@ -125,9 +130,20 @@ function DataRecordSection({ job }: { job: JobDetail }) {
       {report && (
         <>
           <div className="model-info-row"><span>可用時間</span><strong>
-            {report.available_time.source}＋發布延遲 {report.available_time.publication_delay_sec} 秒
-            {report.available_time.delay_status === "assumed" ? "（未實測假設）" : ""}
+            {report.available_time.source}＋發布延遲 {report.available_time.delays
+              ? Object.entries(report.available_time.delays).map(([tf, d]) => tf + " " + d.sec + " 秒" + (d.status === "assumed" ? "（未實測假設）" : "")).join("、")
+              : report.available_time.publication_delay_sec + " 秒" + (report.available_time.delay_status === "assumed" ? "（未實測假設）" : "")}
           </strong></div>
+          {report.alignment && (
+            <div className="model-info-row"><span>對齊規則</span><strong>
+              {report.alignment.allow_previous_session ? "可沿用前一時段" : "不沿用前一時段"}、最多往前 {report.alignment.max_sessions_back ?? "不限"} 個時段、過舊上限 {report.alignment.max_age_sec ?? "不限"}{report.alignment.max_age_sec ? " 秒" : ""}
+            </strong></div>
+          )}
+          {report.history_requirements && (
+            <div className="model-info-row"><span>往前載入</span><strong>
+              {Object.entries(report.history_requirements.bars).map(([tf, n]) => tf + " " + n + " 根").join("、")}（暖機 ε {report.history_requirements.epsilon}）
+            </strong></div>
+          )}
           {Object.entries(report.timeframes).map(([tf, r]) => r && (
             <details className="model-params-detail" key={tf}>
               <summary>{tf}：{r.n_rows.toLocaleString()} 根，排除 {r.n_excluded} 根{r.n_missing_bars !== undefined ? "，缺 " + r.n_missing_bars.toLocaleString() + " 根" : ""}</summary>
@@ -145,10 +161,34 @@ function DataRecordSection({ job }: { job: JobDetail }) {
                 <div className="model-info-row" key={k}><span>資料版本</span><strong>{k}：{v.toLocaleString()}</strong></div>
               ))}
               <div className="model-info-row"><span>範圍</span><strong>{r.first_datetime} ~ {r.last_datetime}</strong></div>
+              {r.lookback && (
+                <div className="model-info-row"><span>期間前暖機</span><strong>{r.lookback.loaded_bars}/{r.lookback.requested_bars} 根（自 {r.lookback.load_from}）{r.lookback.shortfall > 0 ? "，不足 " + r.lookback.shortfall + " 根" : ""}</strong></div>
+              )}
             </details>
           ))}
         </>
       )}
+      {Object.entries(job.result ?? {}).map(([nid, r]) => {
+        const tm = (r as { training_meta?: Record<string, any> }).training_meta;
+        if (!tm || tm.pipeline !== "v2") return null;
+        return (
+          <details className="model-params-detail" key={"v2-" + nid}>
+            <summary>{nid}：樣本框架與排除（v2）</summary>
+            <div className="model-info-row"><span>框架雜湊</span><strong>{String(tm.frame?.hash ?? "").slice(0, 16)}</strong></div>
+            <div className="model-info-row"><span>框架計數</span><strong>train {tm.frame?.counts?.train}、val {tm.frame?.counts?.val}、排除 {tm.frame?.counts?.excluded}</strong></div>
+            {["train", "val"].map((k) => tm.exclusions?.[k] && Object.keys(tm.exclusions[k]).length > 0 && (
+              <div className="model-info-row" key={k}><span>{k} 輸入不足</span><strong>{Object.entries(tm.exclusions[k]).map(([c, n]) => c + " " + n).join("、")}</strong></div>
+            ))}
+            <div className="model-info-row"><span>排除比例</span><strong>{(Number(tm.exclusion_ratio ?? 0) * 100).toFixed(1)}%</strong></div>
+            {tm.branches && Object.entries(tm.branches as Record<string, any>).map(([bid, b]) => (
+              <div className="model-info-row" key={bid}><span>分支 {bid}</span><strong>{b.timeframe}、window {b.window}、{b.encoder}；沿用前一時段 {b.n_from_previous_session} 筆，距決策時刻中位 {b.median_age_sec ?? "—"} 秒</strong></div>
+            ))}
+            {tm.warmup && Object.entries(tm.warmup as Record<string, any>).map(([fid, w]) => (
+              <div className="model-info-row" key={fid}><span>暖機 {fid}</span><strong>{w.total_bars} 根（{w.memory_type}{w.transform?.type && w.transform.type !== "none" ? "，" + w.transform.type : ""}）</strong></div>
+            ))}
+          </details>
+        );
+      })}
       {job.env_fingerprint && (
         <details className="model-params-detail">
           <summary>執行環境</summary>
@@ -386,7 +426,8 @@ export default function ModelTrainingPage() {
     let cancelled = false;
     async function poll() {
       try {
-        const list: JobSummary[] = await fetch(`${API_BASE}/api/model/jobs?limit=10`).then((r) => r.json());
+        // 輕量清單（只有 ID／類型／狀態／建立時間），下拉選單列出全部紀錄；選定後才讀單筆完整內容
+        const list: JobSummary[] = await fetch(`${API_BASE}/api/model/job-summaries`).then((r) => r.json());
         if (cancelled) return;
         setJobList(list);
         const active = list.find((j) => j.status === "pending" || j.status === "running") ?? null;

@@ -25,6 +25,28 @@ API 容器（沒裝 torch，且理論上也不一定會用到這支）匯入不�
 import numpy as np
 
 
+def probability_scores(y_true, y_proba, classes) -> dict:
+    """機率品質（2026-11-21）：
+    brier     二元＝mean((p₁ − y)²)；多分類＝mean(Σ_k (p_k − 1[y=k])²)（Brier 1950 原始定義，各類加總）
+    log_loss  sklearn log_loss，labels 固定為全部類別（驗證集缺某類也能算）"""
+    from sklearn.metrics import log_loss
+
+    y_true = np.asarray(y_true).astype(int)
+    p = np.asarray(y_proba, dtype=float)
+    if len(y_true) == 0:
+        reason = "沒有樣本"
+        return {"brier": None, "brier_unavailable_reason": reason, "log_loss": None, "log_loss_unavailable_reason": reason}
+    if len(classes) == 2:
+        brier = float(np.mean((p[:, 1] - y_true) ** 2))
+    else:
+        onehot = np.zeros_like(p)
+        onehot[np.arange(len(y_true)), np.searchsorted(classes, y_true)] = 1.0
+        brier = float(np.mean(np.sum((p - onehot) ** 2, axis=1)))
+    s = p.sum(axis=1, keepdims=True)
+    pn = np.divide(p, s, out=np.full_like(p, 1.0 / p.shape[1]), where=s > 0)  # 浮點誤差下列和不剛好為 1
+    return {"brier": brier, "log_loss": float(log_loss(y_true, pn, labels=classes))}
+
+
 def classification_evaluation(y_true, y_pred, y_proba=None, n_classes: int | None = None, y_train=None) -> dict:
     """`y_true`／`y_pred` 是類別索引（整數）；`y_proba` 是 (n, k) 的機率陣列（k=n_classes），
     沒有機率輸出（例如架構只給類別、沒有 predict_proba）就傳 None，ROC-AUC／AP 會明講原因。
@@ -57,7 +79,10 @@ def classification_evaluation(y_true, y_pred, y_proba=None, n_classes: int | Non
         reason = "沒有機率輸出（架構這個輸出模式不是機率），ROC-AUC／AP 需要機率分數才能算"
         out["roc_auc"], out["roc_auc_unavailable_reason"] = None, reason
         out["average_precision"], out["average_precision_unavailable_reason"] = None, reason
+        out["brier"], out["brier_unavailable_reason"] = None, reason.replace("ROC-AUC／AP", "Brier／Log loss")
+        out["log_loss"], out["log_loss_unavailable_reason"] = None, out["brier_unavailable_reason"]
     else:
+        out.update(probability_scores(y_true, y_proba, classes))
         from sklearn.metrics import average_precision_score, roc_auc_score
 
         y_proba = np.asarray(y_proba)

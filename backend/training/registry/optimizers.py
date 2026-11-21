@@ -31,7 +31,8 @@ def register(key: str, *, label: str, slot_compatibility: list):
     return deco
 
 
-@register("adam", label="Adam", slot_compatibility=[("lstm", "optimizer")])
+@register("adam", label="Adam", slot_compatibility=[("lstm", "optimizer"), ("gru", "optimizer"),
+                                                ("cnn_lstm", "optimizer"), ("transformer", "optimizer")])
 class Adam:
     """Adam（torch.optim.Adam）。weight_decay 是 Adam 原始的 L2 形式（加進梯度，不是 AdamW 的解耦式）。"""
 

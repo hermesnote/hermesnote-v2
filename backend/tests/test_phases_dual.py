@@ -18,6 +18,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
+import tests  # noqa: E402,F401 — 正式 hermesnote DB 防護（tests/__init__.py），必須在 training／services 之前
 from routers import model_training as router  # noqa: E402
 from tests import contract_harness as H  # noqa: E402
 from tests.test_lstm_dual import KEY, daily_df, graph_spec, params  # noqa: E402
@@ -124,6 +125,17 @@ class RouterLineageTests(unittest.TestCase):
         self._orig = (router.job_store.get_job, router.job_store.create_job, router.model_artifacts.artifact_exists)
         router.job_store.get_job, router.job_store.create_job = get_job, create_job
         router.model_artifacts.artifact_exists = artifact_exists
+        # M3：Phase 3 建立時寫一筆 holdout 使用紀錄；測試替身記錄呼叫，不碰資料庫
+        from training import experiment_store
+
+        self.usage = []
+        self._orig_usage = experiment_store.write_holdout_usage
+
+        async def write_holdout_usage(kind, **kw):
+            self.usage.append((kind, kw))
+
+        experiment_store.write_holdout_usage = write_holdout_usage
+        self.addCleanup(lambda: setattr(experiment_store, "write_holdout_usage", self._orig_usage))
         self.addCleanup(self.restore)
 
     def restore(self):
@@ -136,7 +148,7 @@ class RouterLineageTests(unittest.TestCase):
         out = self.call(router.start_training(router.TrainRequest(start="", end="", nodes=[], phase=2, parent_job_id="p1")))
         self.assertEqual(out, {"job_id": "new-job", "warnings": []})
         spec, kw = self.created[0]
-        self.assertEqual(kw, {"phase": 2, "parent_job_id": "p1", "warnings": []})
+        self.assertEqual(kw, {"phase": 2, "parent_job_id": "p1", "warnings": [], "requested_by": None})
         self.assertEqual(spec["nodes"][-1]["split_strategy"], "chronological")
 
     def test_phase2_rerun_uses_same_parent_and_creates_equal_spec(self):
@@ -149,7 +161,7 @@ class RouterLineageTests(unittest.TestCase):
         g = self.jobs["p1"]["graph_spec"]
         self.call(router.start_training(router.TrainRequest(start=g["start"], end=g["end"], nodes=g["nodes"], phase=1)))
         self.assertEqual(self.created[0][0], g)
-        self.assertEqual(self.created[0][1], {"phase": 1, "warnings": []})
+        self.assertEqual(self.created[0][1], {"phase": 1, "warnings": [], "requested_by": None})
 
     def test_phase3_route_creates_infer_job_and_rerun_payload_matches(self):
         req = router.InferRequest(target_job_id="p2", target_node_id="dual", start="2024-03-01", end="2024-04-01", phase=3)
@@ -157,7 +169,7 @@ class RouterLineageTests(unittest.TestCase):
         spec, kw = self.created[0]
         self.assertEqual(spec, {"target_job_id": "p2", "target_node_id": "dual", "start": "2024-03-01", "end": "2024-04-01",
                                 "use_weights": "best"})
-        self.assertEqual(kw, {"job_type": "infer", "phase": 3, "parent_job_id": "p2", "warnings": []})
+        self.assertEqual(kw, {"job_type": "infer", "phase": 3, "parent_job_id": "p2", "warnings": [], "requested_by": None})
         # 後台重跑 Phase 3：用紀錄裡的 spec 原樣＋phase=3 再送，得到同樣的推論任務
         self.call(router.start_inference(router.InferRequest(**spec, phase=3)))
         self.assertEqual(self.created[1], self.created[0])

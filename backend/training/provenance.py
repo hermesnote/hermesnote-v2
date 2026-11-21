@@ -16,7 +16,9 @@ import platform
 import sys
 from datetime import date
 
-PIPELINE_VERSION = "2026-11-r1"
+# 2026-11-r1：讀取修正（M1）。2026-11-r2：v2 引擎（mode="v2" 的圖）、Phase 3 評估、實驗層（M2～M7）。
+# 舊格式的圖在 r2 的訓練結果與 r1 逐位元組相同（contract_harness 驗證）；結果比較仍以流程版本區隔。
+PIPELINE_VERSION = "2026-11-r2"
 RESEARCH_DATA_END = date(2026, 1, 1)
 
 

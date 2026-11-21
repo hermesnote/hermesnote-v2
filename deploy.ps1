@@ -80,7 +80,8 @@ function Assert-RobocopySucceeded([string]$label) {
 
 robocopy "$LOCAL_ROOT\frontend\dist" "$SMB_HERMES\frontend\dist" /MIR /NFL /NDL /NJH /NJS
 Assert-RobocopySucceeded "frontend/dist"
-robocopy "$LOCAL_ROOT\backend" "$SMB_HERMES\backend" /MIR /XD __pycache__ .git .venv /XF "*.pyc" "*.pyo" /NFL /NDL /NJH /NJS
+# backend\tests 只在本機執行，不部署（2026-11-21）；用完整路徑排除，只排除這一個資料夾
+robocopy "$LOCAL_ROOT\backend" "$SMB_HERMES\backend" /MIR /XD __pycache__ .git .venv "$LOCAL_ROOT\backend\tests" /XF "*.pyc" "*.pyo" /NFL /NDL /NJH /NJS
 Assert-RobocopySucceeded "backend"
 # docs/agent-api 是給外部 Agent（Hermes Agent 等）唯讀查閱的操作手冊，不是給任何 container
 # 消費的程式碼，跟 frontend/dist、backend 一樣單純鏡像過去，不需要重建/重啟任何容器就會生效

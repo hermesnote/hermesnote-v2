@@ -57,7 +57,18 @@ def default_output_specs(node: dict, label_node: dict, task_type: str) -> dict:
                 "description": f"各類別機率，{k} 欄，欄位順序即類別索引"}
     else:
         spec = {"kind": "class", "columns": 1, "target": target, "description": "預測類別索引"}
+    names = class_names(label_node) if task_type == "classification" else None
+    if names is not None:
+        spec["classes"] = names  # 類別型 outcome 宣告的類別順序（索引＝位置）
     return {DEFAULT_OUTPUT: spec}
+
+
+def class_names(label_node: dict) -> list | None:
+    """類別型 outcome（例如 first_crossing）宣告的類別名稱；其他目標回 None。"""
+    from training.registry import outcomes
+
+    fn = outcomes.OUTCOME_CLASSES.get(label_node.get("outcome"))
+    return fn(label_node.get("params") or {}) if fn else None
 
 
 def build_event_rule(rule: dict, target_unit: str | None) -> dict:

@@ -428,6 +428,13 @@ def run_graph(
                                    "target_available_ts": target_avail is not None},
             }
             model_result["task_type"] = task_type
+            # 訓練集統計（Phase 3 基準用；2026-11 M3 起保存進產物，不影響訓練與輸出）
+            from training.holdout_eval import train_stats
+
+            model_result["train_stats"] = train_stats(
+                task_type, y[train_idx],
+                int((label_node.get("params") or {}).get("n_classes", 2)) if task_type == "classification" else None,
+                node.get("params"))
             model_result["prediction_source"] = prediction_source.tolist()
             model_result["preprocessing_state"] = {
                 "method": "minmax", "min": feat_min.tolist(), "scale": feat_scale.tolist(),

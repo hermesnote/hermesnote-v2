@@ -513,7 +513,7 @@ class EntryPointTests(unittest.TestCase):
         self.created: list = []
         self._orig = (job_store.create_job, job_store.get_job)
 
-        async def fake_create(graph_spec, job_type="train", phase=None, parent_job_id=None, warnings=None):
+        async def fake_create(graph_spec, job_type="train", phase=None, parent_job_id=None, warnings=None, requested_by=None):
             self.created.append({"spec": graph_spec, "phase": phase, "parent": parent_job_id})
             return "fake-job-id"
 
@@ -653,7 +653,7 @@ class ResultSummaryTests(unittest.TestCase):
             result = wm.run_one_sync("job", spec, {"tx_1m": H._DF})
         finally:
             wm.write_progress, wm.save_artifacts_for_job = orig
-        self.assertEqual(sorted(result["up"]), ["device", "final_metrics", "output_specs", "training_meta"])
+        self.assertEqual(sorted(result["up"]), ["device", "final_metrics", "output_specs", "train_stats", "training_meta"])
         self.assertNotIn("prediction_source", json.dumps(result))
         self.assertLess(len(json.dumps(result)), 5000)
 

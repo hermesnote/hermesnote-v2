@@ -9,6 +9,7 @@ import LoginPage from "./pages/admin/LoginPage";
 import AdminLayout from "./pages/admin/AdminLayout";
 import AdminDashboard from "./pages/admin/AdminDashboard";
 import ModelSettings from "./pages/admin/sections/ModelSettings";
+import ModelExperiments from "./pages/admin/sections/ModelExperiments";
 import QuantSettings from "./pages/admin/sections/QuantSettings";
 import TradingSystem from "./pages/admin/sections/TradingSystem";
 import Ledger from "./pages/admin/sections/Ledger";
@@ -41,6 +42,7 @@ export default function App() {
           >
             <Route index element={<AdminDashboard />} />
             <Route path="model" element={<ModelSettings />} />
+            <Route path="model-experiments" element={<ModelExperiments />} />
             <Route path="quant" element={<QuantSettings />} />
             <Route path="trading" element={<TradingSystem />} />
             <Route path="ledger" element={<Ledger />} />
