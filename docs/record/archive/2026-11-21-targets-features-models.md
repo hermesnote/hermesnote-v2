@@ -85,3 +85,4 @@ Dot 的評估請求（首次越界、區間高低點、價格位置／K 棒形�
 - 舊任務：`GET /jobs/{id}` 對 Phase 3 依逐筆 exclusion_reason 唯讀補正並標 `backfilled`；總數不符維持原值。兩筆實例唯讀試算：n_unmatured 5、n_excluded 65。
 - 測試：`HoldoutCountTests` 2 項；全部 334 項通過（skipped 15）；harness ALL MATCH；前端 tsc 通過。
 - 部署（Hermes 同意，commit `94b8ae1`）：部署前 pending／running 0 筆；容器內改動檔 md5 與本機相同；線上 GET /jobs/{id}：97f106eb、11efbc24 皆 n_unmatured 5、n_excluded 65、分項 gap 40／cross_session 20／unmatured 5（backfilled）；job-summaries 200。
+- MCP 唯讀驗收通過（同日）：兩筆 best／last 共 10,288 筆逐筆紀錄，計數、分項、backfilled、說明文字、指標皆正確；/evaluations 舊值保留 65，依約以 GET /jobs/{id} 判讀。
